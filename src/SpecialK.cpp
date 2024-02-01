@@ -237,8 +237,7 @@ SK_KeepAway (void)
     hash_lower (wszAppShortName);
 
   const bool xbox =
-    ((StrStrIW (wszAppFullName, L"XboxGames") != nullptr) || PathFileExistsW (L"gamelaunchhelper.exe")) &&
-    (!StrStrIW (wszAppFullName, L"gamelaunchhelper.exe"));
+    ((StrStrIW (wszAppFullName, L"\\Content\\") != nullptr) || PathFileExistsW (L"gamelaunchhelper.exe"));
 
   auto _TestUndesirableDll = [&]
    (const std::initializer_list <constexpr_module_s>& list,
@@ -1225,7 +1224,7 @@ SK_EstablishDllRole (skWin32Module&& _sk_module)
 
       bool is_epic_game = (! is_steamworks_game) &&
            (    StrStrIW (GetCommandLineW (), L"-epicapp") ||
-             SK_Path_wcsstr (wszProcessName, LR"(Epic Games\)") != nullptr );
+              SK_Path_wcsstr (wszProcessName, LR"(Epic Games\)") != nullptr );
 
       bool is_microsoft_game = (! is_steamworks_game) && (! is_epic_game) &&
            SK_IsModuleLoaded (L"AppXDeploymentClient.dll");
@@ -1527,20 +1526,20 @@ SK_Attach (DLL_ROLE role)
           void
           {
             cs_dbghelp =
-              new SK_Thread_HybridSpinlock (16384);
+              new SK_Thread_HybridSpinlock (2048UL);
             budget_mutex =
-              new SK_Thread_HybridSpinlock (  100);
+              new SK_Thread_HybridSpinlock ( 100UL);
             init_mutex   =
-              new SK_Thread_HybridSpinlock ( 2150);
+              new SK_Thread_HybridSpinlock ( 768UL);
             wmi_cs       =
-              new SK_Thread_HybridSpinlock (  128);
+              new SK_Thread_HybridSpinlock ( 128UL);
 
             steam_callback_cs =
-              new SK_Thread_HybridSpinlock (256UL);
+              new SK_Thread_HybridSpinlock ( 256UL);
             platform_popup_cs =
-              new SK_Thread_HybridSpinlock (512UL);
+              new SK_Thread_HybridSpinlock ( 512UL);
             steam_init_cs     =
-              new SK_Thread_HybridSpinlock (128UL);
+              new SK_Thread_HybridSpinlock ( 128UL);
           };
 
     _InitMutexes ();

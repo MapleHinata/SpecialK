@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of Special K.
  *
  * Special K is free software : you can redistribute it
@@ -28,6 +28,7 @@
 
 #include <Windows.h>
 #include <joystickapi.h>
+#include <SetupAPI.h>
 
 #include <cstdint>
 #include <assert.h>
@@ -150,11 +151,13 @@ struct sk_input_api_context_s
   constexpr sk_input_api_context_s (void) noexcept { };
 
   volatile LONG reads  [4] = { },
-                writes [4] = { };
+                writes [4] = { },
+                hidden [4] = { };
 
   struct {
     volatile LONG reads  [4] = { },
-                  writes [4] = { };
+                  writes [4] = { },
+                  hidden [4] = { };
   } last_frame;
 
   struct {
@@ -174,7 +177,8 @@ struct sk_input_api_context_s
       bool other;
       bool gamepad_nintendo;
     };
-  } active { false, false, false, false };
+    bool   hidden;
+  } active { false, false, false, false, false };
 
   struct {
     union {
@@ -233,43 +237,69 @@ struct sk_input_api_context_s
     }
   }
 
+  void markHidden (sk_input_dev_type type) noexcept
+  { InterlockedIncrement (&last_frame.reads  [ type == sk_input_dev_type::Mouse    ? 0 :
+                                               type == sk_input_dev_type::Keyboard ? 1 :
+                                               type == sk_input_dev_type::Gamepad  ? 2 : 3 ] );
+    InterlockedIncrement (&last_frame.hidden [ type == sk_input_dev_type::Mouse    ? 0 :
+                                               type == sk_input_dev_type::Keyboard ? 1 :
+                                               type == sk_input_dev_type::Gamepad  ? 2 : 3 ] ); }
+
+  void markHidden (sk_win32_func type) noexcept
+  { InterlockedIncrement (&last_frame.reads  [ type == sk_win32_func::GetCursorPos     ? 0 :
+                                               type == sk_win32_func::GetKeyState      ? 1 :
+                                               type == sk_win32_func::GetKeyboardState ? 2 : 3 ] );
+    InterlockedIncrement (&last_frame.hidden [ type == sk_win32_func::GetCursorPos     ? 0 :
+                                               type == sk_win32_func::GetKeyState      ? 1 :
+                                               type == sk_win32_func::GetKeyboardState ? 2 : 3 ] ); }
+
   bool nextFrameWin32 (void)
   {
     bool active_data = false;
 
     active.keyboard = false; active.gamepad = false;
     active.mouse    = false; active.other   = false;
+    active.hidden   = false;
 
 
     InterlockedAdd  (&reads   [0], last_frame.reads  [0]);
     InterlockedAdd  (&writes  [0], last_frame.writes [0]);
+    InterlockedAdd  (&hidden  [0], last_frame.hidden [0]);
 
-      if (ReadAcquire (&last_frame.reads  [0]))  { active.mouse = true; active_data = true; }
-      if (ReadAcquire (&last_frame.writes [0]))  { active.mouse = true; active_data = true; }
+      if (ReadAcquire (&last_frame.reads  [0]))  { active.mouse    |= (ReadAcquire (&last_frame.hidden [0]) == 0); active_data = true; }
+      if (ReadAcquire (&last_frame.writes [0]))  { active.mouse    |= (ReadAcquire (&last_frame.hidden [0]) == 0); active_data = true; }
 
     InterlockedAdd  (&reads   [1], last_frame.reads  [1]);
     InterlockedAdd  (&writes  [1], last_frame.writes [1]);
+    InterlockedAdd  (&hidden  [1], last_frame.hidden [1]);
 
-      if (ReadAcquire (&last_frame.reads  [1]))  { active.keyboard = true; active_data = true; }
-      if (ReadAcquire (&last_frame.writes [1]))  { active.keyboard = true; active_data = true; }
+      if (ReadAcquire (&last_frame.reads  [1]))  { active.keyboard |= (ReadAcquire (&last_frame.hidden [1]) == 0); active_data = true; }
+      if (ReadAcquire (&last_frame.writes [1]))  { active.keyboard |= (ReadAcquire (&last_frame.hidden [1]) == 0); active_data = true; }
 
     InterlockedAdd  (&reads   [2], last_frame.reads  [2]);
     InterlockedAdd  (&writes  [2], last_frame.writes [2]);
+    InterlockedAdd  (&hidden  [2], last_frame.hidden [2]);
 
-      if (ReadAcquire (&last_frame.reads  [2]))  { active.keyboard = true; active_data = true; }
-      if (ReadAcquire (&last_frame.writes [2]))  { active.keyboard = true; active_data = true; }
+      if (ReadAcquire (&last_frame.reads  [2]))  { active.keyboard |= (ReadAcquire (&last_frame.hidden [2]) == 0); active_data = true; }
+      if (ReadAcquire (&last_frame.writes [2]))  { active.keyboard |= (ReadAcquire (&last_frame.hidden [2]) == 0); active_data = true; }
 
     InterlockedAdd  (&reads   [3], last_frame.reads  [3]);
     InterlockedAdd  (&writes  [3], last_frame.writes [3]);
+    InterlockedAdd  (&hidden  [3], last_frame.hidden [3]);
 
-      if (ReadAcquire (&last_frame.reads  [3]))  { active.keyboard = true; active_data = true; }
-      if (ReadAcquire (&last_frame.writes [3]))  { active.keyboard = true; active_data = true; }
+      if (ReadAcquire (&last_frame.reads  [3]))  { active.keyboard |= (ReadAcquire (&last_frame.hidden [3]) == 0); active_data = true; }
+      if (ReadAcquire (&last_frame.writes [3]))  { active.keyboard |= (ReadAcquire (&last_frame.hidden [3]) == 0); active_data = true; }
+
+
+    active.hidden = !(active.keyboard || active.mouse);
 
 
     InterlockedExchange (&last_frame.reads  [0], 0);   InterlockedExchange (&last_frame.reads  [1], 0);
     InterlockedExchange (&last_frame.writes [0], 0);   InterlockedExchange (&last_frame.writes [1], 0);
+    InterlockedExchange (&last_frame.hidden [0], 0);   InterlockedExchange (&last_frame.hidden [1], 0);
     InterlockedExchange (&last_frame.reads  [2], 0);   InterlockedExchange (&last_frame.reads  [3], 0);
     InterlockedExchange (&last_frame.writes [2], 0);   InterlockedExchange (&last_frame.writes [3], 0);
+    InterlockedExchange (&last_frame.hidden [2], 0);   InterlockedExchange (&last_frame.hidden [3], 0);
 
 
     return active_data;
@@ -282,37 +312,47 @@ struct sk_input_api_context_s
 
     active.keyboard = false; active.gamepad = false;
     active.mouse    = false; active.other   = false;
+    active.hidden   = false;
 
 
     InterlockedAdd  (&reads   [0], last_frame.reads  [0]);
     InterlockedAdd  (&writes  [0], last_frame.writes [0]);
+    InterlockedAdd  (&hidden  [0], last_frame.hidden [0]);
 
-      if (ReadAcquire (&last_frame.reads  [0]))  { active.keyboard = true; active_data = true; }
-      if (ReadAcquire (&last_frame.writes [0]))  { active.keyboard = true; active_data = true; }
+      if (ReadAcquire (&last_frame.reads  [0]))  { active.keyboard = ReadAcquire (&last_frame.hidden [0]) == 0; active_data = true; }
+      if (ReadAcquire (&last_frame.writes [0]))  { active.keyboard = ReadAcquire (&last_frame.hidden [0]) == 0; active_data = true; }
 
     InterlockedAdd  (&reads   [1], last_frame.reads  [1]);
     InterlockedAdd  (&writes  [1], last_frame.writes [1]);
+    InterlockedAdd  (&hidden  [1], last_frame.hidden [1]);
 
-      if (ReadAcquire (&last_frame.reads  [1]))  { active.mouse    = true; active_data = true; }
-      if (ReadAcquire (&last_frame.writes [1]))  { active.mouse    = true; active_data = true; }
+      if (ReadAcquire (&last_frame.reads  [1]))  { active.mouse    = ReadAcquire (&last_frame.hidden [1]) == 0; active_data = true; }
+      if (ReadAcquire (&last_frame.writes [1]))  { active.mouse    = ReadAcquire (&last_frame.hidden [1]) == 0; active_data = true; }
 
     InterlockedAdd  (&reads   [2], last_frame.reads  [2]);
     InterlockedAdd  (&writes  [2], last_frame.writes [2]);
+    InterlockedAdd  (&hidden  [2], last_frame.hidden [2]);
 
-      if (ReadAcquire (&last_frame.reads  [2]))  { active.gamepad  = true; active_data = true; }
-      if (ReadAcquire (&last_frame.writes [2]))  { active.gamepad  = true; active_data = true; }
+      if (ReadAcquire (&last_frame.reads  [2]))  { active.gamepad  = ReadAcquire (&last_frame.hidden [2]) == 0; active_data = true; }
+      if (ReadAcquire (&last_frame.writes [2]))  { active.gamepad  = ReadAcquire (&last_frame.hidden [2]) == 0; active_data = true; }
 
     InterlockedAdd  (&reads   [3], last_frame.reads  [3]);
     InterlockedAdd  (&writes  [3], last_frame.writes [3]);
+    InterlockedAdd  (&hidden  [3], last_frame.hidden [3]);
 
-      if (ReadAcquire (&last_frame.reads  [3]))  { active.other    = true; active_data = true; }
-      if (ReadAcquire (&last_frame.writes [3]))  { active.other    = true; active_data = true; }
+      if (ReadAcquire (&last_frame.reads  [3]))  { active.other    = ReadAcquire (&last_frame.hidden [3]) == 0; active_data = true; }
+      if (ReadAcquire (&last_frame.writes [3]))  { active.other    = ReadAcquire (&last_frame.hidden [3]) == 0; active_data = true; }
+
+
+    active.hidden = !(active.keyboard || active.mouse || active.gamepad || active.other);
 
 
     InterlockedExchange (&last_frame.reads  [0], 0);   InterlockedExchange (&last_frame.reads  [1], 0);
     InterlockedExchange (&last_frame.writes [0], 0);   InterlockedExchange (&last_frame.writes [1], 0);
+    InterlockedExchange (&last_frame.hidden [0], 0);   InterlockedExchange (&last_frame.hidden [1], 0);
     InterlockedExchange (&last_frame.reads  [2], 0);   InterlockedExchange (&last_frame.reads  [3], 0);
     InterlockedExchange (&last_frame.writes [2], 0);   InterlockedExchange (&last_frame.writes [3], 0);
+    InterlockedExchange (&last_frame.hidden [2], 0);   InterlockedExchange (&last_frame.hidden [3], 0);
 
 
     return active_data;
@@ -537,6 +577,24 @@ SK_ImGui_CenterCursorOnWindow (void);
 #include <hidusage.h>
 #include <Hidpi.h>
 
+using HidP_GetButtonCaps_pfn = NTSTATUS (__stdcall *)(
+  _In_                                                  HIDP_REPORT_TYPE     ReportType,
+  _Out_writes_to_(*ButtonCapsLength, *ButtonCapsLength) PHIDP_BUTTON_CAPS    ButtonCaps,
+  _Inout_                                               PUSHORT              ButtonCapsLength,
+  _In_                                                  PHIDP_PREPARSED_DATA PreparsedData
+);
+
+using HidP_GetUsages_pfn = NTSTATUS (__stdcall *)(
+  _In_                                        HIDP_REPORT_TYPE     ReportType,
+  _In_                                        USAGE                UsagePage,
+  _In_opt_                                    USHORT               LinkCollection,
+  _Out_writes_to_(*UsageLength, *UsageLength) PUSAGE               UsageList,
+  _Inout_                                     PULONG               UsageLength,
+  _In_                                        PHIDP_PREPARSED_DATA PreparsedData,
+  _Out_writes_bytes_(ReportLength)            PCHAR                Report,
+  _In_                                        ULONG                ReportLength
+);
+
 using HidP_GetCaps_pfn = NTSTATUS (__stdcall *)(
   _In_  PHIDP_PREPARSED_DATA PreparsedData,
   _Out_ PHIDP_CAPS           Capabilities
@@ -566,6 +624,62 @@ using HidD_GetFeature_pfn = BOOLEAN (__stdcall *)(
   _In_  ULONG  ReportBufferLength
 );
 
+using  HidD_GetInputReport_pfn = BOOLEAN (__stdcall *)(
+  _In_ HANDLE        HidDeviceObject,
+  _Out_writes_bytes_(ReportBufferLength)
+       PVOID         ReportBuffer,
+  _In_ ULONG         ReportBufferLength
+);
+
+using CreateFile2_pfn =
+  HANDLE (WINAPI *)(LPCWSTR,DWORD,DWORD,DWORD,
+                      LPCREATEFILE2_EXTENDED_PARAMETERS);
+
+using CreateFileW_pfn =
+  HANDLE (WINAPI *)(LPCWSTR,DWORD,DWORD,LPSECURITY_ATTRIBUTES,
+                      DWORD,DWORD,HANDLE);
+
+using CreateFileA_pfn =
+  HANDLE (WINAPI *)(LPCSTR,DWORD,DWORD,LPSECURITY_ATTRIBUTES,
+                      DWORD,DWORD,HANDLE);
+
+using ReadFile_pfn =
+  BOOL (WINAPI *)(HANDLE,LPVOID,DWORD,LPDWORD,LPOVERLAPPED);
+
+using ReadFileEx_pfn =
+  BOOL (WINAPI *)(HANDLE,LPVOID,DWORD,LPOVERLAPPED,
+                    LPOVERLAPPED_COMPLETION_ROUTINE);
+
+using OpenFileMappingW_pfn =
+  HANDLE (WINAPI *)(DWORD,BOOL,LPCWSTR);
+
+using CreateFileMappingW_pfn =
+  HANDLE (WINAPI *)(HANDLE,LPSECURITY_ATTRIBUTES,DWORD,
+                     DWORD,DWORD,LPCWSTR);
+
+using DeviceIoControl_pfn =
+BOOL (WINAPI *)(HANDLE       hDevice,
+                DWORD        dwIoControlCode,
+                LPVOID       lpInBuffer,
+                DWORD        nInBufferSize,
+                LPVOID       lpOutBuffer,
+                DWORD        nOutBufferSize,
+                LPDWORD      lpBytesReturned,
+                LPOVERLAPPED lpOverlapped);
+
+using GetOverlappedResult_pfn =
+BOOL (WINAPI *)(HANDLE       hFile,
+                LPOVERLAPPED lpOverlapped,
+                LPDWORD      lpNumberOfBytesTransferred,
+                BOOL         bWait);
+
+using GetOverlappedResultEx_pfn =
+BOOL (WINAPI *)(HANDLE       hFile,
+                LPOVERLAPPED lpOverlapped,
+                LPDWORD      lpNumberOfBytesTransferred,
+                DWORD        dwMilliseconds,
+                BOOL         bWait);
+
 extern HidP_GetCaps_pfn           HidP_GetCaps_Original          ;
 extern HidD_GetPreparsedData_pfn  HidD_GetPreparsedData_Original ;
 extern HidD_FreePreparsedData_pfn HidD_FreePreparsedData_Original;
@@ -573,19 +687,92 @@ extern HidD_GetFeature_pfn        HidD_GetFeature_Original       ;
 extern HidP_GetData_pfn           HidP_GetData_Original          ;
 extern SetCursor_pfn              SetCursor_Original             ;
 
+extern HidD_GetInputReport_pfn    SK_HidD_GetInputReport;
+extern HidD_GetPreparsedData_pfn  SK_HidD_GetPreparsedData;
+extern HidD_FreePreparsedData_pfn SK_HidD_FreePreparsedData;
+extern HidD_GetFeature_pfn        SK_HidD_GetFeature;
+extern HidP_GetData_pfn           SK_HidP_GetData;
+extern HidP_GetCaps_pfn           SK_HidP_GetCaps;
+extern HidP_GetButtonCaps_pfn     SK_HidP_GetButtonCaps;
+extern HidP_GetUsages_pfn         SK_HidP_GetUsages;
 
-BOOLEAN
-WINAPI
-SK_HidD_GetPreparsedData (_In_  HANDLE                HidDeviceObject,
-                          _Out_ PHIDP_PREPARSED_DATA *PreparsedData);
-BOOLEAN
-WINAPI
-SK_HidD_FreePreparsedData (_In_ PHIDP_PREPARSED_DATA PreparsedData);
+extern ReadFile_pfn               SK_ReadFile;
+extern CreateFile2_pfn            SK_CreateFile2;
 
-NTSTATUS
-WINAPI
-SK_HidP_GetCaps (_In_  PHIDP_PREPARSED_DATA PreparsedData,
-                 _Out_ PHIDP_CAPS           Capabilities);
+using SetupDiDestroyDeviceInfoList_pfn = BOOL (WINAPI *)(
+  _In_ HDEVINFO DeviceInfoSet );
+
+using SetupDiGetClassDevsW_pfn = HDEVINFO (WINAPI *)(
+  _In_opt_ CONST GUID   *ClassGuid,
+  _In_opt_       PCWSTR  Enumerator,
+  _In_opt_       HWND    hwndParent,
+  _In_           DWORD   Flags );
+
+using SetupDiGetClassDevsA_pfn = HDEVINFO (WINAPI *)(
+  _In_opt_ CONST GUID   *ClassGuid,
+  _In_opt_       PCSTR   Enumerator,
+  _In_opt_       HWND    hwndParent,
+  _In_           DWORD   Flags );
+
+using SetupDiEnumDeviceInfo_pfn = BOOL (WINAPI *)(
+  _In_  HDEVINFO         DeviceInfoSet,
+  _In_  DWORD            MemberIndex,
+  _Out_ PSP_DEVINFO_DATA DeviceInfoData );
+
+using SetupDiEnumDeviceInterfaces_pfn = BOOL (WINAPI *)(
+  _In_       HDEVINFO                  DeviceInfoSet,
+  _In_opt_   PSP_DEVINFO_DATA          DeviceInfoData,
+  _In_ CONST GUID                     *InterfaceClassGuid,
+  _In_       DWORD                     MemberIndex,
+  _Out_      PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData );
+
+using SetupDiGetDeviceInterfaceDetailW_pfn = BOOL (WINAPI *)(
+  _In_      HDEVINFO                           DeviceInfoSet,
+  _In_      PSP_DEVICE_INTERFACE_DATA          DeviceInterfaceData,
+  _Out_writes_bytes_to_opt_(DeviceInterfaceDetailDataSize, *RequiredSize)
+            PSP_DEVICE_INTERFACE_DETAIL_DATA_W DeviceInterfaceDetailData,
+  _In_      DWORD                              DeviceInterfaceDetailDataSize,
+  _Out_opt_ _Out_range_(>=, sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W))
+            PDWORD                             RequiredSize,
+  _Out_opt_ PSP_DEVINFO_DATA                   DeviceInfoData );
+
+using SetupDiGetDeviceInterfaceDetailA_pfn = BOOL (WINAPI *)(
+  _In_      HDEVINFO                           DeviceInfoSet,
+  _In_      PSP_DEVICE_INTERFACE_DATA          DeviceInterfaceData,
+  _Out_writes_bytes_to_opt_(DeviceInterfaceDetailDataSize, *RequiredSize)
+            PSP_DEVICE_INTERFACE_DETAIL_DATA_A DeviceInterfaceDetailData,
+  _In_      DWORD                              DeviceInterfaceDetailDataSize,
+  _Out_opt_ _Out_range_(>=, sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_A))
+            PDWORD                             RequiredSize,
+  _Out_opt_ PSP_DEVINFO_DATA                   DeviceInfoData );
+
+using SetupDiGetClassDevsExW_pfn = HDEVINFO (WINAPI *)(
+  _In_opt_ CONST GUID    *ClassGuid,
+  _In_opt_       PCWSTR   Enumerator,
+  _In_opt_       HWND     hwndParent,
+  _In_           DWORD    Flags,
+  _In_opt_       HDEVINFO DeviceInfoSet,
+  _In_opt_       PCWSTR   MachineName,
+  _Reserved_     PVOID    Reserved );
+
+using SetupDiGetClassDevsExA_pfn = HDEVINFO (WINAPI *)(
+  _In_opt_ CONST GUID    *ClassGuid,
+  _In_opt_       PCSTR    Enumerator,
+  _In_opt_       HWND     hwndParent,
+  _In_           DWORD    Flags,
+  _In_opt_       HDEVINFO DeviceInfoSet,
+  _In_opt_       PCSTR    MachineName,
+  _Reserved_     PVOID    Reserved );
+
+extern SetupDiGetClassDevsW_pfn             SK_SetupDiGetClassDevsW;
+extern SetupDiGetClassDevsA_pfn             SK_SetupDiGetClassDevsA;
+extern SetupDiGetClassDevsExW_pfn           SK_SetupDiGetClassDevsExW;
+extern SetupDiGetClassDevsExA_pfn           SK_SetupDiGetClassDevsExA;
+extern SetupDiEnumDeviceInfo_pfn            SK_SetupDiEnumDeviceInfo;
+extern SetupDiEnumDeviceInterfaces_pfn      SK_SetupDiEnumDeviceInterfaces;
+extern SetupDiGetDeviceInterfaceDetailW_pfn SK_SetupDiGetDeviceInterfaceDetailW;
+extern SetupDiGetDeviceInterfaceDetailA_pfn SK_SetupDiGetDeviceInterfaceDetailA;
+extern SetupDiDestroyDeviceInfoList_pfn     SK_SetupDiDestroyDeviceInfoList;
 
 BOOL
 WINAPI
@@ -598,6 +785,47 @@ SK_DeviceIoControl (HANDLE       hDevice,
                     LPDWORD      lpBytesReturned,
                     LPOVERLAPPED lpOverlapped);
 
+struct SK_HID_PlayStationDevice {
+  HANDLE               hDeviceFile              = nullptr;
+  wchar_t              wszDevicePath [MAX_PATH] = {     };
+  PHIDP_PREPARSED_DATA pPreparsedData           = nullptr;
+  bool                 bConnected               =    true;
+  bool                 bDualSense               =   false;
+  bool                 bDualSenseEdge           =   false;
+
+  struct button_s {
+    bool state;
+    bool last_state;
+
+    USAGE Usage;
+    USAGE UsagePage;
+  };
+
+  struct dpad_s {
+    BYTE state;
+    BYTE last_state;
+
+    USAGE Usage;
+    USAGE UsagePage;
+  } dpad;
+
+  USAGE button_usage_min;
+  USAGE button_usage_max;
+
+  UCHAR button_report_id;
+  UCHAR dpad_report_id;
+
+  std::vector <button_s> buttons;
+  std::vector <USAGE>    button_usages;
+  std::vector <BYTE>     input_report;
+};
+extern concurrency::concurrent_vector <SK_HID_PlayStationDevice> SK_HID_PlayStationControllers;
+
+bool SK_ImGui_HasPlayStationController   (void);
+bool SK_ImGui_HasDualSenseController     (void);
+bool SK_ImGui_HasDualSenseEdgeController (void);
+
+void SK_HID_SetupPlayStationControllers (void);
 
 
 // Temporarily override game's preferences for input device window message generation
@@ -691,55 +919,6 @@ enum SK_InputEnablement {
   DisabledInBackground = 2
 };
 
-using CreateFile2_pfn =
-  HANDLE (WINAPI *)(LPCWSTR,DWORD,DWORD,DWORD,
-                      LPCREATEFILE2_EXTENDED_PARAMETERS);
-
-using CreateFileW_pfn =
-  HANDLE (WINAPI *)(LPCWSTR,DWORD,DWORD,LPSECURITY_ATTRIBUTES,
-                      DWORD,DWORD,HANDLE);
-
-using CreateFileA_pfn =
-  HANDLE (WINAPI *)(LPCSTR,DWORD,DWORD,LPSECURITY_ATTRIBUTES,
-                      DWORD,DWORD,HANDLE);
-
-using ReadFile_pfn =
-  BOOL (WINAPI *)(HANDLE,LPVOID,DWORD,LPDWORD,LPOVERLAPPED);
-
-using ReadFileEx_pfn =
-  BOOL (WINAPI *)(HANDLE,LPVOID,DWORD,LPOVERLAPPED,
-                    LPOVERLAPPED_COMPLETION_ROUTINE);
-
-using OpenFileMappingW_pfn =
-  HANDLE (WINAPI *)(DWORD,BOOL,LPCWSTR);
-
-using CreateFileMappingW_pfn =
-  HANDLE (WINAPI *)(HANDLE,LPSECURITY_ATTRIBUTES,DWORD,
-                     DWORD,DWORD,LPCWSTR);
-
-using DeviceIoControl_pfn =
-BOOL (WINAPI *)(HANDLE       hDevice,
-                DWORD        dwIoControlCode,
-                LPVOID       lpInBuffer,
-                DWORD        nInBufferSize,
-                LPVOID       lpOutBuffer,
-                DWORD        nOutBufferSize,
-                LPDWORD      lpBytesReturned,
-                LPOVERLAPPED lpOverlapped);
-
-using GetOverlappedResult_pfn =
-BOOL (WINAPI *)(HANDLE       hFile,
-                LPOVERLAPPED lpOverlapped,
-                LPDWORD      lpNumberOfBytesTransferred,
-                BOOL         bWait);
-
-using GetOverlappedResultEx_pfn =
-BOOL (WINAPI *)(HANDLE       hFile,
-                LPOVERLAPPED lpOverlapped,
-                LPDWORD      lpNumberOfBytesTransferred,
-                DWORD        dwMilliseconds,
-                BOOL         bWait);
-
 using joyGetNumDevs_pfn  = MMRESULT (WINAPI *)(void);
 using joyGetPos_pfn      = MMRESULT (WINAPI *)(UINT,LPJOYINFO);
 using joyGetPosEx_pfn    = MMRESULT (WINAPI *)(UINT,LPJOYINFOEX);
@@ -749,5 +928,27 @@ extern joyGetPos_pfn   joyGetPos_Original;
 extern joyGetPosEx_pfn joyGetPosEx_Original;
 
 void SK_Win32_NotifyDeviceChange (void);
+
+#define SK_HID_VID_8BITDO          0x2dc8
+#define SK_HID_VID_LOGITECH        0x046d
+#define SK_HID_VID_MICROSOFT       0x045e
+#define SK_HID_VID_NINTENDO        0x057e
+#define SK_HID_VID_NVIDIA          0x0955
+#define SK_HID_VID_RAZER           0x1532
+#define SK_HID_VID_SONY            0x054c
+#define SK_HID_VID_VALVE           0x28de
+
+#define SK_HID_PID_XUSB            0x02a1 // Xbox 360 Controller Protocol
+#define SK_HID_PID_XBOXGIP         0x02ff // Xbox One Controller Protocol
+#define SK_HID_PID_STEAM_VIRTUAL   0x11ff // Steam Emulated Controller
+
+#define SK_HID_PID_DUALSHOCK3      0x0268
+#define SK_HID_PID_DUALSHOCK4      0x05c4
+#define SK_HID_PID_DUALSHOCK4_REV2 0x09cc
+#define SK_HID_PID_DUALSENSE       0x0ce6
+#define SK_HID_PID_DUALSENSE_EDGE  0x0df2
+
+static constexpr GUID GUID_XUSB_INTERFACE_CLASS =
+  { 0xEC87F1E3L, 0xC13B, 0x4100, { 0xB5, 0xF7, 0x8B, 0x84, 0xD5, 0x42, 0x60, 0xCB } };
 
 #endif /* __SK__INPUT_H__ */

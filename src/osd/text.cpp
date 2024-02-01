@@ -1,4 +1,4 @@
-/**
+ï»¿/**
  * This file is part of Special K.
  *
  * Special K is free software : you can redistribute it
@@ -580,20 +580,20 @@ SK_FormatTemperature (double in_temp, SK_UNITS in_unit, SK_UNITS out_unit, SK_TL
     //converted = in_temp * 2 + 30;
     converted = (in_temp * (9.0/5.0)) + 32.0;
     len       =
-      SK_FormatStringView (pszStr, (const char *)u8"%#5.1f°F", converted);
+      SK_FormatStringView (pszStr, (const char *)u8"%#5.1fÂ°F", converted);
   }
 
   else if (in_unit == Fahrenheit && out_unit == Celsius)
   {
     converted = (in_temp - 32.0) * (5.0/9.0);
     len       =
-      SK_FormatStringView (pszStr, (const char *)u8"%#4.1f°C", converted);
+      SK_FormatStringView (pszStr, (const char *)u8"%#4.1fÂ°C", converted);
   }
 
   else
   {
     len =
-      SK_FormatStringView (pszStr, (const char *)u8"%#4.1f°C", in_temp);
+      SK_FormatStringView (pszStr, (const char *)u8"%#4.1fÂ°C", in_temp);
   }
                   ((char *)pszStr.data ())[std::min ((size_t)16, len)] = '\0';
   return                   pszStr;
@@ -764,6 +764,14 @@ SK_DrawOSD (void)
     OSD_PRINTF "\n\n" OSD_END
   }
 
+  static auto& rb =
+    SK_GetCurrentRenderBackend ();
+
+  const bool gsync =
+    ( sk::NVAPI::nv_hardware && config.apis.NvAPI.gsync_status &&
+      rb.gsync_state.capable &&
+      rb.gsync_state.active  );
+
   auto _DrawFrameCountIf = [&](bool predicate = true)
   {
     if (! (config.fps.framenumber && predicate))
@@ -792,9 +800,6 @@ SK_DrawOSD (void)
 
   _DrawFrameCountIf (config.fps.compact);
 
-  static auto& rb =
-    SK_GetCurrentRenderBackend ();
-
   // Delay this a few frames so we do not create multiple framerate limiters
   //
   //  * Each SwapChain gets one, and some games have temporary init-only SwapChains...
@@ -805,6 +810,13 @@ SK_DrawOSD (void)
 
   if (pLimiter != nullptr)
   {
+    if (sk::NVAPI::nv_hardware && config.apis.NvAPI.gsync_status && rb.api == SK_RenderAPI::D3D12)
+    {
+      // It is necessary to start PresentMon in D3D12, or the VRR indicator will not work
+      extern void SK_SpawnPresentMonWorker (void);
+                  SK_SpawnPresentMonWorker ();
+    }
+
     auto &history =
       pLimiter->frame_history_snapshots->frame_history,
          &history2 =
@@ -828,11 +840,6 @@ SK_DrawOSD (void)
       last_fps_time = dwTime;
     }
 
-    const bool gsync =
-     ( sk::NVAPI::nv_hardware && config.apis.NvAPI.gsync_status &&
-       rb.gsync_state.capable &&
-       rb.gsync_state.active  );
-
     if (fabs (mean - INFINITY) > std::numeric_limits <double>::epsilon ())
     {
       const char* format = "";
@@ -844,7 +851,8 @@ SK_DrawOSD (void)
 
       if (config.fps.compact)
       {
-        OSD_PRINTF ("%*hs%2.0f\n"), left_padding, pad_str, fps
+        OSD_PRINTF (gsync ? "%*hs%2.0f VRR\n"
+                          : "%*hs%2.0f\n"), left_padding, pad_str, fps
         OSD_END
       }
 

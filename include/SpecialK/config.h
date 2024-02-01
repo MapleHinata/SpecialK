@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of Special K.
  *
  * Special K is free software : you can redistribute it
@@ -921,7 +921,7 @@ struct sk_config_t
         bool  capture_mouse;      // Unconditionally capture the mouse (i.e. block it)
       };
       bool    capture_hidden      = false; // Capture mouse if HW cursor is not visible
-      bool    capture_keyboard    = false;
+      bool    capture_keyboard    = false; // ^^^ Disabled by default because it interferes with cursor auto-hide
       bool    capture_gamepad     = false;
       bool    use_hw_cursor       =  true;
       bool    use_raw_input       =  true;
@@ -1324,10 +1324,11 @@ struct SK_AppCache_Manager
                                       const wchar_t* wszAppName,
                                          const char* szEpicApp );
 
-  std::wstring  getConfigPathFromAppPath (const wchar_t* wszPath)    const; // Steam
-  std::wstring  getConfigPathFromCmdLine (const wchar_t* wszCmdLine) const; // Epic
-  std::wstring  getConfigPathForAppID    (uint64_t       uiAppID)    const;
-  std::wstring  getConfigPathForEpicApp  (const char*    szEpicApp)  const;
+  std::wstring  getConfigPathFromAppPath   (const wchar_t* wszPath)           const; // Steam
+  std::wstring  getConfigPathFromCmdLine   (const wchar_t* wszCmdLine)        const; // Epic
+  std::wstring  getConfigPathForAppID      (uint64_t       uiAppID)           const;
+  std::wstring  getConfigPathForEpicApp    (const char*    szEpicApp)         const;
+  std::wstring  getConfigPathForGenericApp (const wchar_t *wszGenericAppName) const; // Other
 
   int           migrateProfileData       (LPVOID reserved = nullptr);
 
@@ -1495,6 +1496,7 @@ enum class SK_GAME_ID
   CrashReport,                  // CrashReport.exe (ironically, causes crashes)
   StreetFighter6,               // StreetFighter6.exe
   StardewValley,                // Stardew Valley.exe
+  DOOMEternal,                  // DOOMEternalx64vk.exe
 
   UNKNOWN_GAME               = 0xffff
 };

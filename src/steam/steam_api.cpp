@@ -1,4 +1,4 @@
-/**
+﻿/**
 * This file is part of Special K.
 *
 * Special K is free software : you can redistribute it
@@ -31,14 +31,6 @@
 //  by hand.
 #define STEAM_API_NODLL
 #include <SpecialK/steam_api.h>
-
-//
-// SK has an official Steam AppID, and it is deliberately configured to
-//   disable many annoying Steam client "features" (e.g. Steam Input) ;)
-// 
-//   * Money well spent!
-//
-constexpr AppId_t SPECIAL_KILLER_APPID = 1157970;
 
 #ifndef __cpp_lib_format
 #define __cpp_lib_format
@@ -1267,6 +1259,7 @@ SK_IsSteamOverlayActive (void)
 #define SK_STEAM_READ(type)  SK_Steam_Backend->markRead   (type);
 #define SK_STEAM_WRITE(type) SK_Steam_Backend->markWrite  (type);
 #define SK_STEAM_VIEW(type)  SK_Steam_Backend->markViewed (type);
+#define SK_STEAM_HIDE(type)  SK_Steam_Backend->markHidden (type);
 
 using SteamAPI_ISteamController_GetDigitalActionData_pfn = ControllerDigitalActionData_t (S_CALLTYPE *)(ISteamController *, ControllerHandle_t, ControllerDigitalActionHandle_t);
 using SteamAPI_ISteamController_GetAnalogActionData_pfn  = ControllerAnalogActionData_t  (S_CALLTYPE *)(ISteamController *, ControllerHandle_t, ControllerAnalogActionHandle_t);
@@ -4013,7 +4006,7 @@ SteamAPI_ManualDispatch_Init_Detour (void)
 
 bool
 S_CALLTYPE
-SteamAPI_ISteamInput_Init_Detour (bool bExplicitlyCallRunFrame)
+SteamAPI_ISteamInput_Init_Detour (ISteamInput* This, bool bExplicitlyCallRunFrame)
 {
   SK_LOG_FIRST_CALL
 
@@ -4025,7 +4018,7 @@ SteamAPI_ISteamInput_Init_Detour (bool bExplicitlyCallRunFrame)
   }
 
   return
-    SteamAPI_ISteamInput_Init_Original (bExplicitlyCallRunFrame);
+    SteamAPI_ISteamInput_Init_Original (This, bExplicitlyCallRunFrame);
 }
 
 bool
@@ -5652,7 +5645,7 @@ SK_SteamAPIContext::OnFileDetailsDone ( FileDetailsResult_t* pParam,
 }
 
 void
-SK_Steam_SignalEmulatedXInputActivity (DWORD dwSlot)
+SK_Steam_SignalEmulatedXInputActivity (DWORD dwSlot, bool blocked)
 {
   static iSK_INI *controller_ini =
     SK_CreateINI (
@@ -5750,7 +5743,10 @@ SK_Steam_SignalEmulatedXInputActivity (DWORD dwSlot)
 
   if (device_types [dwSlot] != sk_input_dev_type::Other)
   {
-    SK_STEAM_VIEW (device_types [dwSlot])
+    if (! blocked)
+      SK_STEAM_VIEW (device_types [dwSlot])
+    else
+      SK_STEAM_HIDE (device_types [dwSlot])
   }
 
 #if 0
@@ -7581,7 +7577,9 @@ SK_Steam_GetAppID_NoAPI (void)
   //
   // Alternative platforms init now
   //
-  else if (StrStrIA (GetCommandLineA (), "-epicapp"))
+  else if ( StrStrIA (GetCommandLineA (), "-epicapp") ||
+                        PathFileExistsW (L".egstore") ||
+                     PathFileExistsW (L"../.egstore") )
   {
     SK::EOS::Init (false); // Hook EOS SDK; game was launched by Epic
     SK::EOS::AppName (  ); // Use manifest to get app name

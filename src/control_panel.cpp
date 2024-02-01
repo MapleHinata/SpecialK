@@ -711,19 +711,29 @@ std::string
 SK_GetFriendlyAppName (void)
 {
   const         bool bSteam        = (SK::SteamAPI::AppID () != 0x0);
-  static const  bool bEpic         = StrStrIA (GetCommandLineA (), "-epicapp");
+  static const  bool bEpic         = StrStrIA (GetCommandLineA (), "-epicapp") ||
+                                                 PathFileExistsW (L".egstore") ||
+                                              PathFileExistsW (L"../.egstore") ||
+                          StrStrIW (SK_GetFullyQualifiedApp (), L"Epic Games");
 
   static auto& rb =
     SK_GetCurrentRenderBackend ();
 
-  if (bSteam || bEpic || *rb.windows.focus.title != L'\0')
+  static std::string appcache_name =
+    SK_WideCharToUTF8 (
+      app_cache_mgr->getAppNameFromPath (
+        SK_GetFullyQualifiedApp ()
+      )
+    );
+
+  if (bSteam || bEpic || (! appcache_name.empty ()) || *rb.windows.focus.title != L'\0')
   {
     static std::string window_title =
       SK_WideCharToUTF8 (rb.windows.focus.title);
 
     // For non-Steam/Epic games, if the window title changes, then update
     //   the control panel's title...
-    if (! (bSteam || bEpic))
+    if (appcache_name.empty () && (! (bSteam || bEpic)))
     {
       static ULONG64     last_changed = 0;
       if (std::exchange (last_changed, rb.windows.focus.last_changed) !=
@@ -737,7 +747,9 @@ SK_GetFriendlyAppName (void)
     std::string& appname = bSteam ?
        SK::SteamAPI::AppName ()   :
                            bEpic  ?
-            SK::EOS::AppName ()   : window_title;
+            SK::EOS::AppName ()   : 
+      (! appcache_name.empty ())  ?
+         appcache_name            : window_title;
 
     return appname;
   }
@@ -759,8 +771,11 @@ const char*
 SK_ImGui_ControlPanelTitle (void)
 {
   static        char szTitle [512] = { };
-  const         bool bSteam        = (SK::SteamAPI::AppID () != 0x0);
-  static const  bool bEpic         = StrStrIA (GetCommandLineA (), "-epicapp");
+//const         bool bSteam        = (SK::SteamAPI::AppID () != 0x0);
+  static const  bool bEpic         = StrStrIA (GetCommandLineA (), "-epicapp") ||
+                                                 PathFileExistsW (L".egstore") ||
+                                              PathFileExistsW (L"../.egstore") ||
+                          StrStrIW (SK_GetFullyQualifiedApp (), L"Epic Games");
 
   static auto& rb =
     SK_GetCurrentRenderBackend ();
@@ -792,28 +807,31 @@ SK_ImGui_ControlPanelTitle (void)
   uint32_t   mins    = (elapsed / 60ULL) % 60ULL;
   uint32_t   hours   =  elapsed / 3600ULL;
 
-  if (bSteam || bEpic || *rb.windows.focus.title != L'\0')
+  auto appname =
+    SK_GetFriendlyAppName ();
+
+  if (! appname.empty ())//bSteam || bEpic || *rb.windows.focus.title != L'\0')
   {
-    static std::string window_title =
-      SK_WideCharToUTF8 (rb.windows.focus.title);
-
-    // For non-Steam/Epic games, if the window title changes, then update
-    //   the control panel's title...
-    if (! (bSteam || bEpic))
-    {
-      static ULONG64     last_changed = 0;
-      if (std::exchange (last_changed, rb.windows.focus.last_changed) !=
-                                       rb.windows.focus.last_changed)
-      {
-        window_title =
-          SK_WideCharToUTF8 (rb.windows.focus.title);
-      }
-    }
-
-    std::string& appname = bSteam ?
-       SK::SteamAPI::AppName ()   :
-                           bEpic  ?
-            SK::EOS::AppName ()   : window_title;
+    //static std::string window_title =
+    //  SK_WideCharToUTF8 (rb.windows.focus.title);
+    //
+    //// For non-Steam/Epic games, if the window title changes, then update
+    ////   the control panel's title...
+    //if (! (bSteam || bEpic))
+    //{
+    //  static ULONG64     last_changed = 0;
+    //  if (std::exchange (last_changed, rb.windows.focus.last_changed) !=
+    //                                   rb.windows.focus.last_changed)
+    //  {
+    //    window_title =
+    //      SK_WideCharToUTF8 (rb.windows.focus.title);
+    //  }
+    //}
+    //
+    //std::string& appname = bSteam ?
+    //   SK::SteamAPI::AppName ()   :
+    //                       bEpic  ?
+    //        SK::EOS::AppName ()   : window_title;
 
     if (! appname.empty ())
       title += "      -      ";
@@ -1397,7 +1415,7 @@ SK_Display_ResolutionSelectUI (bool bMarkDirty = false)
       {
         SK_ImGui_Warning (
           L"Fractional VSYNC Rates Will Prevent VRR From Working\r\n\r\n\t>>"
-          L"SyncIntervalClamp Has Been Disabled (required to use 1/n Refresh VSYNC)"
+          L" SyncIntervalClamp Has Been Disabled (required to use 1/n Refresh VSYNC)"
         );
       }
 
@@ -6252,12 +6270,14 @@ SK_ImGui_ControlPanel (void)
       };
 
     // Add a HUD Free Screenshot keybind option if HUD shaders are present
-    if (rb.api == SK_RenderAPI::D3D11 && keybinds.size () == 2 && ReadAcquire (&SK_D3D11_TrackingCount->Conditional) > 0)
+    if (rb.api == SK_RenderAPI::D3D11 && keybinds.size () == 4 && ReadAcquire (&SK_D3D11_TrackingCount->Conditional) > 0)
         keybinds.emplace (&config.screenshots.game_hud_free_keybind);
 
+#if 0
     // Experimental D3D12 HUDless
-    else if (rb.api == SK_RenderAPI::D3D12 && keybinds.size () == 2)
+    else if (rb.api == SK_RenderAPI::D3D12 && keybinds.size () == 4)
         keybinds.emplace (&config.screenshots.game_hud_free_keybind);
+#endif
 
     ImGui::SameLine   ();
     ImGui::BeginGroup ();
@@ -6570,7 +6590,12 @@ SK_ImGui_MouseProc (int code, WPARAM wParam, LPARAM lParam)
           if (! (game_window.mouse.tracking && game_window.mouse.inside))
             SK_ImGui_UpdateMouseTracker ();
 
-          return 1;
+          // Returning 1 here breaks WM_SETCURSOR behavior;
+          //
+          //   Hopefully we have a subclassed window / window proc hook and
+          //     can remove mouse motion that way, because returning 1 is
+          //       not an option.
+          return 0;
         }
       }
 
@@ -6988,25 +7013,73 @@ SK_ImGui_StageNextFrame (void)
 
     ImGui::Spacing         ();
 
-    ImGui::TextUnformatted ("Press");                   ImGui::SameLine ();
+    ImGui::TextUnformatted ("Press ");                    ImGui::SameLine ();
 
     ImGui::TextColored     ( ImColor::HSV (.16f, 1.f, 1.f),
-                               R"('%hs + %hs + %hs')",
-                                    SK_WideCharToUTF8 (virtualToHuman [VK_CONTROL]).c_str (),
-                                    SK_WideCharToUTF8 (virtualToHuman [VK_SHIFT]).c_str   (),
-                                    SK_WideCharToUTF8 (virtualToHuman [VK_BACK]).c_str    () );
-                                                        ImGui::SameLine ();
-    ImGui::TextUnformatted (", ");                      ImGui::SameLine ();
-
+                               R"('%hs)", SK_WideCharToUTF8 (virtualToHuman [VK_CONTROL]).c_str () );
+    ImGui::SameLine        (   );
+    ImGui::TextUnformatted ("+");
+    ImGui::SameLine        (   );
     ImGui::TextColored     ( ImColor::HSV (.16f, 1.f, 1.f),
-                               R"('Select + Start' (PlayStation))" );
-                                                        ImGui::SameLine ();
-    ImGui::TextUnformatted ("or ");                     ImGui::SameLine ();
+                               R"(%hs)", SK_WideCharToUTF8 (virtualToHuman [VK_SHIFT]).c_str () );
+    ImGui::SameLine        (   );
+    ImGui::TextUnformatted ("+");
+    ImGui::SameLine        (   );
     ImGui::TextColored     ( ImColor::HSV (.16f, 1.f, 1.f),
-                               R"('Back + Start' (Xbox))" );
-                                                        ImGui::SameLine ();
+                               R"(%hs')", SK_WideCharToUTF8 (virtualToHuman [VK_BACK]).c_str () );
 
-    ImGui::TextUnformatted (  "to open Special K's configuration menu. " );
+    if (config.input.gamepad.xinput.ui_slot < 4)
+    {
+                                                          ImGui::SameLine ();
+      ImGui::TextUnformatted ("  or  ");                  ImGui::SameLine ();
+
+      if (SK_ImGui_HasPlayStationController ())
+      {
+        ImGui::TextColored     ( ImColor::HSV (.16f, 1.f, 1.f),
+                                   R"('Select)" );
+        ImGui::SameLine        ();
+        ImGui::TextUnformatted ("+");
+        ImGui::SameLine        ();
+        ImGui::TextColored     ( ImColor::HSV (.16f, 1.f, 1.f),
+                                   R"(Start')" );
+        ImGui::SameLine        ();
+        ImGui::SameLine        ();
+
+        if (config.input.gamepad.scepad.enhanced_ps_button)
+        {
+          ImGui::TextUnformatted ("/");
+          ImGui::SameLine        ();
+          ImGui::TextColored     ( ImColor::HSV (.16f, 1.f, 1.f),
+                                  " (" ICON_FA_PLAYSTATION ")" );
+        }
+
+        else
+        {
+          ImGui::TextColored     ( ImVec4 (.75f, .75f, .75f, 1.f), " (PlayStation)");
+        }
+                                                            ImGui::SameLine ();
+        ImGui::TextUnformatted ("  or  ");                  ImGui::SameLine ();
+      }
+
+      ImGui::TextColored     ( ImColor::HSV (.16f, 1.f, 1.f),
+                                 R"('Back)" );
+      ImGui::SameLine        ();
+      ImGui::TextUnformatted ("+");
+      ImGui::SameLine        ();
+      ImGui::TextColored     ( ImColor::HSV (.16f, 1.f, 1.f),
+                                 R"(Start')" );
+      ImGui::SameLine        ();
+      ImGui::SameLine        ();
+      ImGui::TextColored     ( ImVec4 (.75f, .75f, .75f, 1.f), " (Xbox) ");
+      ImGui::SameLine        ();
+    }
+
+    else {
+      ImGui::SameLine ();
+      ImGui::SameLine ();
+    }
+
+    ImGui::TextUnformatted (  " to open Special K's configuration menu. " );
 
     ImGui::SameLine (); ImGui::Spacing     ();
     ImGui::SameLine (); ImGui::SeparatorEx (ImGuiSeparatorFlags_Vertical);

@@ -55,10 +55,12 @@ SK_InputUtil_IsHWCursorVisible (void)
 #define SK_HID_READ(type)  SK_HID_Backend->markRead   (type);
 #define SK_HID_WRITE(type) SK_HID_Backend->markWrite  (type);
 #define SK_HID_VIEW(type)  SK_HID_Backend->markViewed (type);
+#define SK_HID_HIDE(type)  SK_HID_Backend->markHidden (type);
 
 #define SK_RAWINPUT_READ(type)  SK_RawInput_Backend->markRead   (type);
 #define SK_RAWINPUT_WRITE(type) SK_RawInput_Backend->markWrite  (type);
 #define SK_RAWINPUT_VIEW(type)  SK_RawInput_Backend->markViewed (type);
+#define SK_RAWINPUT_HIDE(type)  SK_RawInput_Backend->markHidden (type);
 
 enum class SK_Input_DeviceFileType
 {
@@ -237,6 +239,7 @@ struct SK_HID_DeviceFile {
   }
 };
 
+       concurrency::concurrent_vector        <SK_HID_PlayStationDevice>     SK_HID_PlayStationControllers;
 static concurrency::concurrent_unordered_map <HANDLE, SK_HID_DeviceFile>    SK_HID_DeviceFiles;
 static concurrency::concurrent_unordered_map <HANDLE, SK_NVIDIA_DeviceFile> SK_NVIDIA_DeviceFiles;
 
@@ -282,6 +285,172 @@ SK_Input_GetDeviceFileAndState (HANDLE hFile)
     { SK_Input_DeviceFileType::Invalid, nullptr, true };
 }
 
+SetupDiGetClassDevsW_pfn             SK_SetupDiGetClassDevsW             = nullptr;
+SetupDiGetClassDevsExW_pfn           SK_SetupDiGetClassDevsExW           = nullptr;
+SetupDiGetClassDevsA_pfn             SK_SetupDiGetClassDevsA             = nullptr;
+SetupDiGetClassDevsExA_pfn           SK_SetupDiGetClassDevsExA           = nullptr;
+SetupDiEnumDeviceInfo_pfn            SK_SetupDiEnumDeviceInfo            = nullptr;
+SetupDiEnumDeviceInterfaces_pfn      SK_SetupDiEnumDeviceInterfaces      = nullptr;
+SetupDiGetDeviceInterfaceDetailW_pfn SK_SetupDiGetDeviceInterfaceDetailW = nullptr;
+SetupDiGetDeviceInterfaceDetailA_pfn SK_SetupDiGetDeviceInterfaceDetailA = nullptr;
+SetupDiDestroyDeviceInfoList_pfn     SK_SetupDiDestroyDeviceInfoList     = nullptr;
+  
+void SK_HID_SetupPlayStationControllers (void)
+{
+  HDEVINFO hid_device_set = 
+    SK_SetupDiGetClassDevsW (&GUID_DEVINTERFACE_HID, nullptr, nullptr, DIGCF_DEVICEINTERFACE |
+                                                                       DIGCF_PRESENT);
+  
+  if (hid_device_set != INVALID_HANDLE_VALUE)
+  {
+    SP_DEVINFO_DATA devInfoData = {
+      .cbSize = sizeof (SP_DEVINFO_DATA)
+    };
+  
+    SP_DEVICE_INTERFACE_DATA devInterfaceData = {
+      .cbSize = sizeof (SP_DEVICE_INTERFACE_DATA)
+    };
+  
+    for (                                     DWORD dwDevIdx = 0            ;
+          SK_SetupDiEnumDeviceInfo (hid_device_set, dwDevIdx, &devInfoData) ;
+                                                  ++dwDevIdx )
+    {
+      devInfoData.cbSize      = sizeof (SP_DEVINFO_DATA);
+      devInterfaceData.cbSize = sizeof (SP_DEVICE_INTERFACE_DATA);
+  
+      if (! SK_SetupDiEnumDeviceInterfaces ( hid_device_set, nullptr, &GUID_DEVINTERFACE_HID,
+                                                   dwDevIdx, &devInterfaceData) )
+      {
+        continue;
+      }
+  
+      static wchar_t devInterfaceDetailData [MAX_PATH + 2];
+  
+      ULONG ulMinimumSize = 0;
+  
+      SK_SetupDiGetDeviceInterfaceDetailW (
+        hid_device_set, &devInterfaceData, nullptr,
+          0, &ulMinimumSize, nullptr );
+  
+      if (GetLastError () != ERROR_INSUFFICIENT_BUFFER)
+        continue;
+  
+      if (ulMinimumSize > sizeof (wchar_t) * (MAX_PATH + 2))
+        continue;
+  
+      SP_DEVICE_INTERFACE_DETAIL_DATA *pDevInterfaceDetailData =
+        (SP_DEVICE_INTERFACE_DETAIL_DATA *)devInterfaceDetailData;
+  
+      pDevInterfaceDetailData->cbSize =
+        sizeof (SP_DEVICE_INTERFACE_DETAIL_DATA);
+  
+      if ( SK_SetupDiGetDeviceInterfaceDetailW (
+             hid_device_set, &devInterfaceData, pDevInterfaceDetailData,
+               ulMinimumSize, &ulMinimumSize, nullptr ) )
+      {
+        wchar_t *wszFileName =
+          pDevInterfaceDetailData->DevicePath;
+  
+        if (StrStrIW (wszFileName, L"VID_054c"))
+        {
+          SK_HID_PlayStationDevice controller;
+  
+          wcsncpy_s (controller.wszDevicePath, MAX_PATH,
+                                wszFileName,   _TRUNCATE);
+  
+          controller.hDeviceFile =
+            SK_CreateFile2 ( wszFileName, FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+                                          FILE_SHARE_READ   | FILE_SHARE_WRITE,
+                                            OPEN_EXISTING, nullptr );
+  
+          if (controller.hDeviceFile != nullptr)
+          {
+            std::vector <HIDP_VALUE_CAPS> value_caps;
+
+            if (! SK_HidD_GetPreparsedData (controller.hDeviceFile, &controller.pPreparsedData))
+            	continue;
+
+            HIDP_CAPS                                      caps = { };
+              SK_HidP_GetCaps (controller.pPreparsedData, &caps);
+
+            controller.input_report.resize (caps.InputReportByteLength);
+
+            std::vector <HIDP_BUTTON_CAPS>
+              buttonCapsArray;
+              buttonCapsArray.resize (caps.NumberInputButtonCaps);
+
+            USHORT num_caps =
+              caps.NumberInputButtonCaps;
+
+            if ( HIDP_STATUS_SUCCESS ==
+              SK_HidP_GetButtonCaps ( HidP_Input,
+                                        buttonCapsArray.data (), &num_caps,
+                                          controller.pPreparsedData ) )
+            {
+              for (UINT i = 0 ; i < num_caps ; ++i)
+              {
+                // Face Buttons
+                if (buttonCapsArray [i].IsRange)
+                {
+                  controller.button_report_id =
+                    buttonCapsArray [i].ReportID;
+                  controller.button_usage_min =
+                    buttonCapsArray [i].Range.UsageMin;
+                  controller.button_usage_max =
+                    buttonCapsArray [i].Range.UsageMax;
+
+                  controller.buttons.resize (
+                    static_cast <size_t> (
+                      controller.button_usage_max -
+                      controller.button_usage_min + 1
+                    )
+                  );
+                }
+
+                // D-Pad
+                else
+                {
+                  // No idea what a third set of buttons would be...
+                  SK_ReleaseAssert (num_caps <= 2);
+
+                  controller.dpad_report_id =
+                    buttonCapsArray [i].ReportID;
+                  controller.dpad.Usage =
+                    buttonCapsArray [i].NotRange.Usage;
+                  controller.dpad.Usage =
+                    buttonCapsArray [i].UsagePage;
+                }
+              }
+
+              // We need a contiguous array to read-back the set buttons,
+              //   rather than allocating it dynamically, do it once and reuse.
+              controller.button_usages.resize (controller.buttons.size ());
+
+              USAGE idx = 0;
+
+              for ( auto& button : controller.buttons )
+              {
+                button.UsagePage = buttonCapsArray [0].UsagePage;
+                button.Usage     = controller.button_usage_min + idx++;
+                button.state     = false;
+              }
+            }
+
+            controller.bConnected = true;
+            controller.bDualSense =
+              StrStrIW (wszFileName, L"PID_0DF2") != nullptr ||
+              StrStrIW (wszFileName, L"PID_0CE6") != nullptr;
+  
+            SK_HID_PlayStationControllers.push_back (controller);
+          }
+        }
+      }
+    }
+  
+    SK_SetupDiDestroyDeviceInfoList (hid_device_set);
+  }
+}
+
 //////////////////////////////////////////////////////////////
 //
 // HIDClass (User mode)
@@ -292,6 +461,15 @@ HidD_FreePreparsedData_pfn HidD_FreePreparsedData_Original = nullptr;
 HidD_GetFeature_pfn        HidD_GetFeature_Original        = nullptr;
 HidP_GetData_pfn           HidP_GetData_Original           = nullptr;
 HidP_GetCaps_pfn           HidP_GetCaps_Original           = nullptr;
+
+HidD_GetPreparsedData_pfn  SK_HidD_GetPreparsedData  = nullptr;
+HidD_FreePreparsedData_pfn SK_HidD_FreePreparsedData = nullptr;
+HidD_GetInputReport_pfn    SK_HidD_GetInputReport    = nullptr;
+HidD_GetFeature_pfn        SK_HidD_GetFeature        = nullptr;
+HidP_GetData_pfn           SK_HidP_GetData           = nullptr;
+HidP_GetCaps_pfn           SK_HidP_GetCaps           = nullptr;
+HidP_GetButtonCaps_pfn     SK_HidP_GetButtonCaps     = nullptr;
+HidP_GetUsages_pfn         SK_HidP_GetUsages         = nullptr;
 
 bool
 SK_HID_FilterPreparsedData (PHIDP_PREPARSED_DATA pData)
@@ -311,43 +489,52 @@ SK_HID_FilterPreparsedData (PHIDP_PREPARSED_DATA pData)
       case HID_USAGE_GENERIC_JOYSTICK:
       case HID_USAGE_GENERIC_MULTI_AXIS_CONTROLLER:
       {
-        SK_HID_READ (sk_input_dev_type::Gamepad)
-
         if (SK_ImGui_WantGamepadCapture () && (! config.input.gamepad.native_ps4))
         {
           filter = true;
+
+          SK_HID_HIDE (sk_input_dev_type::Gamepad);
         }
 
         else
+        {
+          SK_HID_READ (sk_input_dev_type::Gamepad);
           SK_HID_VIEW (sk_input_dev_type::Gamepad);
+        }
       } break;
 
       case HID_USAGE_GENERIC_POINTER:
       case HID_USAGE_GENERIC_MOUSE:
       {
-        SK_HID_READ (sk_input_dev_type::Mouse)
-
         if (SK_ImGui_WantMouseCapture ())
         {
           filter = true;
+
+          SK_HID_HIDE (sk_input_dev_type::Mouse);
         }
 
         else
+        {
+          SK_HID_READ (sk_input_dev_type::Mouse);
           SK_HID_VIEW (sk_input_dev_type::Mouse);
+        }
       } break;
 
       case HID_USAGE_GENERIC_KEYBOARD:
       case HID_USAGE_GENERIC_KEYPAD:
       {
-        SK_HID_READ (sk_input_dev_type::Keyboard)
-
         if (SK_ImGui_WantKeyboardCapture ())
         {
           filter = true;
+
+          SK_HID_HIDE (sk_input_dev_type::Keyboard);
         }
 
         else
+        {
+          SK_HID_READ (sk_input_dev_type::Keyboard);
           SK_HID_VIEW (sk_input_dev_type::Keyboard);
+        }
       } break;
     }
   }
@@ -515,6 +702,10 @@ static CreateFileA_pfn CreateFileA_Original = nullptr;
 static CreateFileW_pfn CreateFileW_Original = nullptr;
 static CreateFile2_pfn CreateFile2_Original = nullptr;
 
+CreateFile2_pfn              SK_CreateFile2 = nullptr;
+ReadFile_pfn                    SK_ReadFile = nullptr;
+
+#if 0
 NTSTATUS
 WINAPI
 SK_HidP_GetCaps (_In_  PHIDP_PREPARSED_DATA PreparsedData,
@@ -600,6 +791,7 @@ SK_HidD_FreePreparsedData (_In_ PHIDP_PREPARSED_DATA PreparsedData)
 
   return FALSE;
 }
+#endif
 
 BOOL
 WINAPI
@@ -726,6 +918,8 @@ ReadFile_Detour (HANDLE       hFile,
 
           if (lpOverlapped == nullptr || CancelIo (hFile))
           {
+            SK_HID_HIDE (hid_file->device_type);
+
             if (lpOverlapped == nullptr) // lpNumberOfBytesRead MUST be non-null
             {
               if (hid_file->last_data_read.size () >= *lpNumberOfBytesRead)
@@ -748,18 +942,18 @@ ReadFile_Detour (HANDLE       hFile,
 
         else
         {
+          SK_HID_READ (hid_file->device_type);
+
           if (lpNumberOfBytesRead != nullptr && lpBuffer != nullptr && lpOverlapped == nullptr)
           {
-            SK_HID_READ (hid_file->device_type);
-
             if (hid_file->last_data_read.size () < nNumberOfBytesToRead)
                 hid_file->last_data_read.resize (  nNumberOfBytesToRead * 2);
 
             memcpy (hid_file->last_data_read.data (), pTlsBackedBuffer, *lpNumberOfBytesRead);
             memcpy (lpBuffer,                         pTlsBackedBuffer, *lpNumberOfBytesRead);
-
-            SK_HID_VIEW (hid_file->device_type);
           }
+
+          SK_HID_VIEW (hid_file->device_type);
         }
       }
 
@@ -809,12 +1003,12 @@ ReadFileEx_Detour (HANDLE                          hFile,
       auto hid_file =
         (SK_HID_DeviceFile *)dev_ptr;
 
-      SK_HID_READ (hid_file->device_type);
-
       if (! dev_allowed)
       {
         if (CancelIo (hFile))
         {
+          SK_HID_HIDE (hid_file->device_type);
+
           SK_RunOnce (
             SK_LOGi0 (L"ReadFileEx HID IO Cancelled")
           );
@@ -823,6 +1017,7 @@ ReadFileEx_Detour (HANDLE                          hFile,
         }
       }
 
+      SK_HID_READ (hid_file->device_type);
       SK_HID_VIEW (hid_file->device_type);
     } break;
 
@@ -1151,6 +1346,8 @@ GetOverlappedResultEx_Detour (HANDLE       hFile,
       {
         if (CancelIo (hFile))
         {
+          SK_HID_HIDE (hid_file->device_type);
+
           SK_RunOnce (
             SK_LOGi0 (L"GetOverlappedResultEx HID IO Cancelled")
           );
@@ -1216,6 +1413,8 @@ GetOverlappedResult_Detour (HANDLE       hFile,
       {
         if (CancelIo (hFile))
         {
+          SK_HID_HIDE (hid_file->device_type);
+
           SK_RunOnce (
             SK_LOGi0 (L"GetOverlappedResult HID IO Cancelled")
           );
@@ -1283,6 +1482,192 @@ DeviceIoControl_Detour (HANDLE       hDevice,
       hDevice, dwIoControlCode, lpInBuffer, nInBufferSize,
         lpOutBuffer, nOutBufferSize, lpBytesReturned, lpOverlapped
     );
+}
+
+//
+// We don't actually call any of these, the hooks will be routed
+//   through a copy of SetupAPI.dll that SK maintains, instead of
+//     one that Valve can render non-functional.
+//
+static SetupDiGetClassDevsW_pfn
+       SetupDiGetClassDevsW_Original             = nullptr;
+static SetupDiGetClassDevsA_pfn
+       SetupDiGetClassDevsA_Original             = nullptr;
+static SetupDiGetClassDevsExW_pfn
+       SetupDiGetClassDevsExW_Original           = nullptr;
+static SetupDiGetClassDevsExA_pfn
+       SetupDiGetClassDevsExA_Original           = nullptr;
+static SetupDiEnumDeviceInterfaces_pfn
+       SetupDiEnumDeviceInterfaces_Original      = nullptr;
+static SetupDiGetDeviceInterfaceDetailW_pfn
+       SetupDiGetDeviceInterfaceDetailW_Original = nullptr;
+static SetupDiGetDeviceInterfaceDetailA_pfn
+       SetupDiGetDeviceInterfaceDetailA_Original = nullptr;
+static SetupDiDestroyDeviceInfoList_pfn
+       SetupDiDestroyDeviceInfoList_Original     = nullptr;
+
+HDEVINFO
+WINAPI
+SetupDiGetClassDevsW_Detour (
+  _In_opt_ const GUID   *ClassGuid,
+  _In_opt_       PCWSTR  Enumerator,
+  _In_opt_       HWND    hwndParent,
+  _In_           DWORD   Flags )
+{
+  if (SK_GetCallingDLL () != SK_GetDLL ())
+  {
+    SK_LOG_FIRST_CALL
+  }
+
+  return
+    SK_SetupDiGetClassDevsW (ClassGuid, Enumerator, hwndParent, Flags);
+}
+
+HDEVINFO
+WINAPI
+SetupDiGetClassDevsA_Detour (
+  _In_opt_ const GUID  *ClassGuid,
+  _In_opt_       PCSTR  Enumerator,
+  _In_opt_       HWND   hwndParent,
+  _In_           DWORD  Flags )
+{
+  if (SK_GetCallingDLL () != SK_GetDLL ())
+  {
+    SK_LOG_FIRST_CALL
+  }
+
+  return
+    SK_SetupDiGetClassDevsA (ClassGuid, Enumerator, hwndParent, Flags);
+}
+
+HDEVINFO
+WINAPI
+SetupDiGetClassDevsExW_Detour (
+  _In_opt_ CONST GUID    *ClassGuid,
+  _In_opt_       PCWSTR   Enumerator,
+  _In_opt_       HWND     hwndParent,
+  _In_           DWORD    Flags,
+  _In_opt_       HDEVINFO DeviceInfoSet,
+  _In_opt_       PCWSTR   MachineName,
+  _Reserved_     PVOID    Reserved )
+{
+  if (SK_GetCallingDLL () != SK_GetDLL ())
+  {
+    SK_LOG_FIRST_CALL
+  }
+
+  return
+    SK_SetupDiGetClassDevsExW (
+      ClassGuid, Enumerator, hwndParent, Flags,
+        DeviceInfoSet, MachineName, Reserved );
+}
+
+HDEVINFO
+WINAPI
+SetupDiGetClassDevsExA_Detour (
+  _In_opt_ CONST GUID    *ClassGuid,
+  _In_opt_       PCSTR    Enumerator,
+  _In_opt_       HWND     hwndParent,
+  _In_           DWORD    Flags,
+  _In_opt_       HDEVINFO DeviceInfoSet,
+  _In_opt_       PCSTR    MachineName,
+  _Reserved_     PVOID    Reserved )
+{
+  if (SK_GetCallingDLL () != SK_GetDLL ())
+  {
+    SK_LOG_FIRST_CALL
+  }
+
+  return
+    SK_SetupDiGetClassDevsExA (
+      ClassGuid, Enumerator, hwndParent, Flags,
+        DeviceInfoSet, MachineName, Reserved );
+}
+
+BOOL
+WINAPI
+SetupDiEnumDeviceInterfaces_Detour (
+  _In_       HDEVINFO                  DeviceInfoSet,
+  _In_opt_   PSP_DEVINFO_DATA          DeviceInfoData,
+  _In_ CONST GUID                     *InterfaceClassGuid,
+  _In_       DWORD                     MemberIndex,
+  _Out_      PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData )
+{
+  if (SK_GetCallingDLL () != SK_GetDLL ())
+  {
+    SK_LOG_FIRST_CALL
+  }
+
+  return
+    SK_SetupDiEnumDeviceInterfaces ( DeviceInfoSet, DeviceInfoData,
+                                       InterfaceClassGuid, MemberIndex,
+                                         DeviceInterfaceData );
+}
+
+BOOL
+WINAPI
+SetupDiGetDeviceInterfaceDetailW_Detour (
+  _In_      HDEVINFO                           DeviceInfoSet,
+  _In_      PSP_DEVICE_INTERFACE_DATA          DeviceInterfaceData,
+  _Out_writes_bytes_to_opt_(DeviceInterfaceDetailDataSize, *RequiredSize)
+            PSP_DEVICE_INTERFACE_DETAIL_DATA_W DeviceInterfaceDetailData,
+  _In_      DWORD                              DeviceInterfaceDetailDataSize,
+  _Out_opt_ _Out_range_(>=, sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W))
+            PDWORD                             RequiredSize,
+  _Out_opt_ PSP_DEVINFO_DATA                   DeviceInfoData )
+{
+  if (SK_GetCallingDLL () != SK_GetDLL ())
+  {
+    SK_LOG_FIRST_CALL
+  }
+
+  return
+    SK_SetupDiGetDeviceInterfaceDetailW ( DeviceInfoSet,
+                                          DeviceInterfaceData,
+                                          DeviceInterfaceDetailData,
+                                          DeviceInterfaceDetailDataSize,
+                                                           RequiredSize,
+                                                           DeviceInfoData );
+}
+
+BOOL
+WINAPI
+SetupDiGetDeviceInterfaceDetailA_Detour (
+  _In_      HDEVINFO                           DeviceInfoSet,
+  _In_      PSP_DEVICE_INTERFACE_DATA          DeviceInterfaceData,
+  _Out_writes_bytes_to_opt_(DeviceInterfaceDetailDataSize, *RequiredSize)
+            PSP_DEVICE_INTERFACE_DETAIL_DATA_A DeviceInterfaceDetailData,
+  _In_      DWORD                              DeviceInterfaceDetailDataSize,
+  _Out_opt_ _Out_range_(>=, sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_A))
+            PDWORD                             RequiredSize,
+  _Out_opt_ PSP_DEVINFO_DATA                   DeviceInfoData )
+{
+  if (SK_GetCallingDLL () != SK_GetDLL ())
+  {
+    SK_LOG_FIRST_CALL
+  }
+
+  return
+    SK_SetupDiGetDeviceInterfaceDetailA ( DeviceInfoSet,
+                                          DeviceInterfaceData,
+                                          DeviceInterfaceDetailData,
+                                          DeviceInterfaceDetailDataSize,
+                                                           RequiredSize,
+                                                           DeviceInfoData );
+}
+
+BOOL
+WINAPI
+SetupDiDestroyDeviceInfoList_Detour (
+  _In_ HDEVINFO DeviceInfoSet )
+{
+  if (SK_GetCallingDLL () != SK_GetDLL ())
+  {
+    SK_LOG_FIRST_CALL
+  }
+
+  return
+    SK_SetupDiDestroyDeviceInfoList (DeviceInfoSet);
 }
 
 void
@@ -1385,6 +1770,225 @@ SK_Input_HookHID (void)
 bool
 SK_Input_PreHookHID (void)
 {
+  static std::filesystem::path path_to_driver_base =
+        (std::filesystem::path (SK_GetInstallPath ()) /
+                               LR"(Drivers\HID)"),
+                                     driver_name =
+                  SK_RunLHIfBitness (64, L"HID_SK64.dll",
+                                         L"HID_SK32.dll"),
+                             path_to_driver = 
+                             path_to_driver_base /
+                                     driver_name;
+
+  static std::filesystem::path path_to_setupapi_base =
+        (std::filesystem::path (SK_GetInstallPath ()) /
+                               LR"(Drivers\SetupAPI)"),
+                                     setupapi_name =
+                  SK_RunLHIfBitness (64, L"SetupAPI_SK64.dll",
+                                         L"SetupAPI_SK32.dll"),
+                             path_to_setupapi = 
+                             path_to_setupapi_base /
+                                     setupapi_name;
+
+  static std::filesystem::path path_to_kernel_base =
+        (std::filesystem::path (SK_GetInstallPath ()) /
+                               LR"(Drivers\Kernel32)"),
+                                     kernel_name =
+                  SK_RunLHIfBitness (64, L"Kernel32_SK64.dll",
+                                         L"Kernel32_SK32.dll"),
+                             path_to_kernel = 
+                             path_to_kernel_base /
+                                     kernel_name;
+
+  static const auto *pSystemDirectory =
+    SK_GetSystemDirectory ();
+
+  std::filesystem::path
+    path_to_system_hid =
+      (std::filesystem::path (pSystemDirectory) / L"hid.dll");
+
+  std::filesystem::path
+    path_to_system_kernel =
+      (std::filesystem::path (pSystemDirectory) / L"kernel32.dll");
+
+  std::filesystem::path
+    path_to_system_setupapi =
+      (std::filesystem::path (pSystemDirectory) / L"SetupAPI.dll");
+
+  std::error_code ec =
+    std::error_code ();
+
+  if (std::filesystem::exists (path_to_system_hid, ec))
+  {
+    if ( (! std::filesystem::exists ( path_to_driver,      ec))||
+         (! SK_Assert_SameDLLVersion (path_to_driver.    c_str (),
+                                      path_to_system_hid.c_str ()) ) )
+    { SK_CreateDirectories           (path_to_driver.c_str ());
+
+      if (   std::filesystem::exists (path_to_system_hid,                 ec))
+      { std::filesystem::remove      (                    path_to_driver, ec);
+        std::filesystem::copy_file   (path_to_system_hid, path_to_driver, ec);
+      }
+    }
+  }
+
+  if (std::filesystem::exists (path_to_system_kernel, ec))
+  {
+    if ( (! std::filesystem::exists ( path_to_kernel,         ec))||
+         (! SK_Assert_SameDLLVersion (path_to_kernel.       c_str (),
+                                      path_to_system_kernel.c_str ()) ) )
+    { SK_CreateDirectories           (path_to_kernel.c_str ());
+
+      if (   std::filesystem::exists (path_to_system_kernel,                 ec))
+      { std::filesystem::remove      (                       path_to_kernel, ec);
+        std::filesystem::copy_file   (path_to_system_kernel, path_to_kernel, ec);
+      }
+    }
+  }
+
+  if (std::filesystem::exists (path_to_system_setupapi, ec))
+  {
+    if ( (! std::filesystem::exists ( path_to_setupapi,         ec))||
+         (! SK_Assert_SameDLLVersion (path_to_setupapi.       c_str (),
+                                      path_to_system_setupapi.c_str ()) ) )
+    { SK_CreateDirectories           (path_to_setupapi.c_str ());
+
+      if (   std::filesystem::exists (path_to_system_setupapi,                   ec))
+      { std::filesystem::remove      (                         path_to_setupapi, ec);
+        std::filesystem::copy_file   (path_to_system_setupapi, path_to_setupapi, ec);
+      }
+    }
+  }
+
+  HMODULE hModHID =
+    SK_LoadLibraryW (path_to_driver.c_str ());
+
+  HMODULE hModKernel32 =
+    SK_LoadLibraryW (path_to_kernel.c_str ());
+
+  HMODULE hModSetupAPI =
+    SK_LoadLibraryW (path_to_setupapi.c_str ());
+
+  if (! (hModHID && hModKernel32 && hModSetupAPI))
+  {
+    SK_LOGi0 (L"Missing required HID DLLs (!!)");
+  }
+                               
+  SK_HidD_GetPreparsedData =
+    (HidD_GetPreparsedData_pfn)SK_GetProcAddress (hModHID,
+    "HidD_GetPreparsedData");
+
+  SK_HidD_FreePreparsedData =
+    (HidD_FreePreparsedData_pfn)SK_GetProcAddress (hModHID,
+    "HidD_FreePreparsedData");
+
+  SK_HidD_GetFeature =
+    (HidD_GetFeature_pfn)SK_GetProcAddress (hModHID,
+    "HidD_GetFeature");
+
+  SK_HidP_GetData =
+    (HidP_GetData_pfn)SK_GetProcAddress (hModHID,
+    "HidP_GetData");
+
+  SK_HidP_GetCaps =
+    (HidP_GetCaps_pfn)SK_GetProcAddress (hModHID,
+    "HidP_GetCaps");
+
+  SK_HidP_GetButtonCaps =
+    (HidP_GetButtonCaps_pfn)SK_GetProcAddress (hModHID,
+    "HidP_GetButtonCaps");
+
+  SK_HidP_GetUsages =
+    (HidP_GetUsages_pfn)SK_GetProcAddress (hModHID,
+    "HidP_GetUsages");
+
+  SK_HidD_GetInputReport =
+    (HidD_GetInputReport_pfn)SK_GetProcAddress (hModHID,
+    "HidD_GetInputReport");
+
+  SK_CreateFile2 =
+    (CreateFile2_pfn)SK_GetProcAddress (hModKernel32,
+    "CreateFile2");
+
+  SK_ReadFile =
+    (ReadFile_pfn)SK_GetProcAddress (hModKernel32,
+    "ReadFile");
+
+  SK_SetupDiGetClassDevsW =
+    (SetupDiGetClassDevsW_pfn)SK_GetProcAddress (hModSetupAPI,
+    "SetupDiGetClassDevsW");
+
+  SK_SetupDiGetClassDevsA =
+    (SetupDiGetClassDevsA_pfn)SK_GetProcAddress (hModSetupAPI,
+    "SetupDiGetClassDevsA");
+
+  SK_SetupDiGetClassDevsExW =
+    (SetupDiGetClassDevsExW_pfn)SK_GetProcAddress (hModSetupAPI,
+    "SetupDiGetClassDevsExW");
+
+  SK_SetupDiGetClassDevsExA =
+    (SetupDiGetClassDevsExA_pfn)SK_GetProcAddress (hModSetupAPI,
+    "SetupDiGetClassDevsExA");
+
+  SK_SetupDiEnumDeviceInfo =
+    (SetupDiEnumDeviceInfo_pfn)SK_GetProcAddress (hModSetupAPI,
+    "SetupDiEnumDeviceInfo");
+
+  SK_SetupDiEnumDeviceInterfaces =
+    (SetupDiEnumDeviceInterfaces_pfn)SK_GetProcAddress (hModSetupAPI,
+    "SetupDiEnumDeviceInterfaces");
+
+  SK_SetupDiGetDeviceInterfaceDetailW =
+    (SetupDiGetDeviceInterfaceDetailW_pfn)SK_GetProcAddress (hModSetupAPI,
+    "SetupDiGetDeviceInterfaceDetailW");
+
+  SK_SetupDiGetDeviceInterfaceDetailA =
+    (SetupDiGetDeviceInterfaceDetailA_pfn)SK_GetProcAddress (hModSetupAPI,
+    "SetupDiGetDeviceInterfaceDetailA");
+
+  SK_SetupDiDestroyDeviceInfoList =
+    (SetupDiDestroyDeviceInfoList_pfn)SK_GetProcAddress (hModSetupAPI,
+    "SetupDiDestroyDeviceInfoList");
+
+  if (config.input.gamepad.steam.disabled_to_game)
+  {
+    // These causes periodic hitches (thanks Valve), so hook them and
+    //   keep Valve's dirty hands off of them.
+    SK_RunOnce (
+      SK_CreateDLLHook2 (L"SetupAPI.dll", "SetupDiGetClassDevsW",
+                                           SetupDiGetClassDevsW_Detour,
+                  static_cast_p2p <void> (&SetupDiGetClassDevsW_Original));
+
+      SK_CreateDLLHook2 (L"SetupAPI.dll", "SetupDiGetClassDevsA",
+                                           SetupDiGetClassDevsA_Detour,
+                  static_cast_p2p <void> (&SetupDiGetClassDevsA_Original));
+
+      SK_CreateDLLHook2 (L"SetupAPI.dll", "SetupDiGetClassDevsExW",
+                                           SetupDiGetClassDevsExW_Detour,
+                  static_cast_p2p <void> (&SetupDiGetClassDevsExW_Original));
+
+      SK_CreateDLLHook2 (L"SetupAPI.dll", "SetupDiGetClassDevsExA",
+                                           SetupDiGetClassDevsExA_Detour,
+                  static_cast_p2p <void> (&SetupDiGetClassDevsExA_Original));
+
+      SK_CreateDLLHook2 (L"SetupAPI.dll", "SetupDiEnumDeviceInterfaces",
+                                           SetupDiEnumDeviceInterfaces_Detour,
+                  static_cast_p2p <void> (&SetupDiEnumDeviceInterfaces_Original));
+
+      SK_CreateDLLHook2 (L"SetupAPI.dll", "SetupDiGetDeviceInterfaceDetailW",
+                                           SetupDiGetDeviceInterfaceDetailW_Detour,
+                  static_cast_p2p <void> (&SetupDiGetDeviceInterfaceDetailW_Original));
+
+      SK_CreateDLLHook2 (L"SetupAPI.dll", "SetupDiGetDeviceInterfaceDetailA",
+                                           SetupDiGetDeviceInterfaceDetailA_Detour,
+                  static_cast_p2p <void> (&SetupDiGetDeviceInterfaceDetailA_Original));
+
+      SK_CreateDLLHook2 (L"SetupAPI.dll", "SetupDiDestroyDeviceInfoList",
+                                           SetupDiDestroyDeviceInfoList_Detour,
+                  static_cast_p2p <void> (&SetupDiDestroyDeviceInfoList_Original));
+    );
+  }
+
   if (! config.input.gamepad.hook_hid)
     return false;
 
@@ -1433,6 +2037,9 @@ joyGetPos_Detour (_In_  UINT      uJoyID,
     if (result == JOYERR_NOERROR)
       SK_WinMM_Backend->markRead (sk_input_dev_type::Gamepad);
   }
+
+  else if (result == JOYERR_NOERROR)
+    SK_WinMM_Backend->markHidden (sk_input_dev_type::Gamepad);
 
   return result;
 }
@@ -1565,6 +2172,8 @@ joyGetPosEx_Detour (_In_  UINT        uJoyID,
 
       return JOYERR_UNPLUGGED;
     }
+
+    SK_WinMM_Backend->markHidden (sk_input_dev_type::Gamepad);
 
     return JOYERR_NOERROR;
   }
@@ -2288,7 +2897,10 @@ GetRawInputBuffer_Detour (_Out_opt_ PRAWINPUT pData,
         {
           SK_RAWINPUT_READ (sk_input_dev_type::Keyboard)
           if (filter || SK_ImGui_WantKeyboardCapture ())
+          {
+            SK_RAWINPUT_HIDE (sk_input_dev_type::Keyboard);
             remove = true;
+          }
           else
             SK_RAWINPUT_VIEW (sk_input_dev_type::Keyboard);
 
@@ -2324,7 +2936,10 @@ GetRawInputBuffer_Detour (_Out_opt_ PRAWINPUT pData,
         case RIM_TYPEMOUSE:
           SK_RAWINPUT_READ (sk_input_dev_type::Mouse)
           if (filter || SK_ImGui_WantMouseCapture ())
+          {
+            SK_RAWINPUT_HIDE (sk_input_dev_type::Mouse);
             remove = true;
+          }
           else
             SK_RAWINPUT_VIEW (sk_input_dev_type::Mouse);
           break;
@@ -2332,7 +2947,10 @@ GetRawInputBuffer_Detour (_Out_opt_ PRAWINPUT pData,
         default:
           SK_RAWINPUT_READ (sk_input_dev_type::Gamepad)
           if (filter || SK_ImGui_WantGamepadCapture ())
+          {
+            SK_RAWINPUT_HIDE (sk_input_dev_type::Gamepad);
             remove = true;
+          }
           else
             SK_RAWINPUT_VIEW (sk_input_dev_type::Gamepad);
           break;
@@ -2595,8 +3213,6 @@ bool
 SK_ImGui_IsAnythingHovered (void)
 {
   return
-    ImGui::IsAnyItemActive  () ||
-    ImGui::IsAnyItemFocused () ||
     ImGui::IsAnyItemHovered () ||
     ImGui::IsWindowHovered  (
                ImGuiHoveredFlags_AnyWindow                    |
@@ -2782,7 +3398,7 @@ ImGuiCursor_Impl (void)
   if (config.input.ui.use_hw_cursor)
   {
     io.MouseDrawCursor =
-      ( (! SK_ImGui_Cursor.idle) && SK_ImGui_IsMouseRelevant () && (! SK_InputUtil_IsHWCursorVisible ()) );
+      ( (! SK_ImGui_Cursor.idle) && SK_ImGui_IsMouseRelevant () && (! SK_InputUtil_IsHWCursorVisible ()));
   }
 
   //
@@ -2826,7 +3442,7 @@ sk_imgui_cursor_s::activateWindow (bool active)
 {
   if (active && config.input.ui.use_hw_cursor)
   {
-    if (SK_ImGui_IsMouseRelevant ())
+    if (SK_ImGui_IsAnythingHovered ())//SK_ImGui_IsMouseRelevant ())
     {
       if (SK_ImGui_WantMouseCapture ())
       {
@@ -2922,7 +3538,7 @@ SK_ImGui_WantGamepadCapture (void)
     {
       // Only needs to be done once, it will be restored at exit.
       SK_RunOnce (
-        SK_Steam_ForceInputAppId (1157970)
+        SK_Steam_ForceInputAppId (SPECIAL_KILLER_APPID)
       );
     }
 
@@ -2937,7 +3553,7 @@ SK_ImGui_WantGamepadCapture (void)
         if (! SK::SteamAPI::SetWindowFocusState (! bCapture))
         {
           SK_Steam_ForceInputAppId ( bCapture ?
-                                      1157970 : config.steam.appid );
+                         SPECIAL_KILLER_APPID : config.steam.appid );
 
           // Delayed command to set the Input AppId to 0
           if (! bCapture)
@@ -3272,7 +3888,7 @@ SetCursor_Detour (
 {
   SK_LOG_FIRST_CALL
 
-  if (SK_ImGui_WantMouseCapture ())//ImGui::GetIO ().WantCaptureMouse)
+  if (SK_ImGui_WantMouseCapture () && SK_ImGui_IsAnythingHovered ())
   {
     if (! config.input.ui.use_hw_cursor)
       return 0;
@@ -3424,6 +4040,8 @@ GetCursorPos_Detour (LPPOINT lpPoint)
 
   if (SK_WantBackgroundRender () && (! SK_IsGameWindowActive ()))
   {
+    SK_Win32_Backend->markHidden (sk_win32_func::GetCursorPos);
+
     *lpPoint = SK_ImGui_Cursor.orig_pos;
 
     SK_ImGui_Cursor.LocalToScreen (lpPoint);
@@ -3446,6 +4064,8 @@ GetCursorPos_Detour (LPPOINT lpPoint)
 
     if (SK_ImGui_WantMouseCapture () || implicit_capture)
     {
+      SK_Win32_Backend->markHidden (sk_win32_func::GetCursorPos);
+
       *lpPoint = SK_ImGui_Cursor.orig_pos;
 
       SK_ImGui_Cursor.LocalToScreen (lpPoint);
@@ -3743,6 +4363,11 @@ SK_GetSharedKeyState_Impl (int vKey, GetAsyncKeyState_pfn pfnGetFunc)
     sKeyState &= ~(1 << 15); // High-Order Bit = 0
     sKeyState &= ~1;         // Low-Order Bit  = 0
 
+    if (pfnGetFunc == GetAsyncKeyState_Original)
+      SK_Win32_Backend->markHidden (sk_win32_func::GetAsyncKeystate);
+    else if (pfnGetFunc == GetKeyState_Original)
+      SK_Win32_Backend->markHidden (sk_win32_func::GetKeyState);
+
     return
       sKeyState;
   };
@@ -3883,6 +4508,8 @@ NtUserGetKeyboardState_Detour (PBYTE lpKeyState)
 
     if (! (capture_keyboard && capture_mouse))
       SK_Win32_Backend->markRead (sk_win32_func::GetKeyboardState);
+    else
+      SK_Win32_Backend->markHidden (sk_win32_func::GetKeyboardState);
   }
 
   return bRet;
@@ -4561,6 +5188,8 @@ SK_Proxy_MouseProc   (
         case WM_XBUTTONDBLCLK:
         case WM_MOUSEWHEEL:
         case WM_MOUSEHWHEEL:
+          SK_WinHook_Backend->markHidden (sk_input_dev_type::Mouse);
+
           return
             CallNextHookEx (
                 nullptr, nCode,
@@ -4573,6 +5202,8 @@ SK_Proxy_MouseProc   (
       // Game uses a mouse hook for input that the Steam overlay cannot block
       if (SK_GetStoreOverlayState (true))
       {
+        SK_WinHook_Backend->markHidden (sk_input_dev_type::Mouse);
+
         return
           CallNextHookEx (0, nCode, wParam, lParam);
       }
@@ -4670,6 +5301,8 @@ SK_Proxy_LLMouseProc   (
         case WM_XBUTTONDBLCLK:
         case WM_MOUSEWHEEL:
         case WM_MOUSEHWHEEL:
+          SK_WinHook_Backend->markHidden (sk_input_dev_type::Mouse);
+
           return
             CallNextHookEx (
                 nullptr, nCode,
@@ -4682,6 +5315,8 @@ SK_Proxy_LLMouseProc   (
       // Game uses a mouse hook for input that the Steam overlay cannot block
       if (SK_GetStoreOverlayState (true))
       {
+        SK_WinHook_Backend->markHidden (sk_input_dev_type::Mouse);
+
         return
           CallNextHookEx (0, nCode, wParam, lParam);
       }
@@ -4744,6 +5379,8 @@ SK_Proxy_KeyboardProc (
 
     if (SK_ImGui_WantKeyboardCapture ())
     {
+      SK_WinHook_Backend->markHidden (sk_input_dev_type::Keyboard);
+
       return
         CallNextHookEx (
             nullptr, nCode,
@@ -4755,6 +5392,8 @@ SK_Proxy_KeyboardProc (
       // Game uses a keyboard hook for input that the Steam overlay cannot block
       if (SK_GetStoreOverlayState (true) || SK_Console::getInstance ()->isVisible ())
       {
+        SK_WinHook_Backend->markHidden (sk_input_dev_type::Keyboard);
+
         return
           CallNextHookEx (0, nCode, wParam, lParam);
       }
@@ -4818,6 +5457,8 @@ SK_Proxy_LLKeyboardProc (
 
     if (SK_ImGui_WantKeyboardCapture ())
     {
+      SK_WinHook_Backend->markHidden (sk_input_dev_type::Keyboard);
+
       return
         CallNextHookEx (
             nullptr, nCode,
@@ -4829,6 +5470,8 @@ SK_Proxy_LLKeyboardProc (
       // Game uses a keyboard hook for input that the Steam overlay cannot block
       if (SK_GetStoreOverlayState (true) || SK_Console::getInstance ()->isVisible ())
       {
+        SK_WinHook_Backend->markHidden (sk_input_dev_type::Keyboard);
+
         return
           CallNextHookEx (0, nCode, wParam, lParam);
       }

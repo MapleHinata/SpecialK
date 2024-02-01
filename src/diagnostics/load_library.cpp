@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of Special K.
  *
  * Special K is free software : you can redistribute it
@@ -315,18 +315,24 @@ SK_TraceLoadLibrary (       HMODULE hCallingMod,
 
     if (cs_dbghelp != nullptr)
     {
-      SK_SymLoadModule ( GetCurrentProcess (),
-                           nullptr,
-                            pszShortName,
-                              nullptr,
-#ifdef _M_AMD64
-                                (DWORD64)mod_info.lpBaseOfDll,
-#else /* _M_IX86 */
-                                  (DWORD)mod_info.lpBaseOfDll,
-#endif
-                                    mod_info.SizeOfImage );
+      std::scoped_lock <SK_Thread_HybridSpinlock> auto_lock (*cs_dbghelp);
 
-      dbghelp_callers.insert (hCallingMod);
+      if ( dbghelp_callers.cend (           ) ==
+           dbghelp_callers.find (hCallingMod) ) 
+      {
+        SK_SymLoadModule ( GetCurrentProcess (),
+                             nullptr,
+                              pszShortName,
+                                nullptr,
+#ifdef _M_AMD64
+                                  (DWORD64)mod_info.lpBaseOfDll,
+#else /* _M_IX86 */
+                                    (DWORD)mod_info.lpBaseOfDll,
+#endif
+                                      mod_info.SizeOfImage );
+
+        dbghelp_callers.insert (hCallingMod);
+      }
     }
   }
 
@@ -824,14 +830,7 @@ LoadLibrary_Marshal ( LPVOID   lpRet,
 
       bool bVulkanLayerDisabled = false;
 
-      // Windows Defender likes to deadlock in the Steam Overlay
-      if (StrStrIW (compliant_path, L"Windows Defender"))
-      {
-        SK_SetLastError (ERROR_MOD_NOT_FOUND);
-        hMod = nullptr;
-      }
-
-      else if (SK_GetCallingDLL (lpRet) == SK_GetModuleHandle (L"vulkan-1.dll") && config.apis.NvAPI.vulkan_bridge == 1)
+      if (SK_GetCallingDLL (lpRet) == SK_GetModuleHandle (L"vulkan-1.dll") && config.apis.NvAPI.vulkan_bridge == 1)
       {
         if (StrStrIW (compliant_path, L"graphics-hook"))
         {
@@ -870,10 +869,26 @@ LoadLibrary_Marshal ( LPVOID   lpRet,
         //}
       }
 
-      if (bVulkanLayerDisabled)
+
+      // Disable EOS Overlay in local injection
+      if (StrStrIW (compliant_path, L"EOSOVH-Win32-Shipping"))
+      {
+        SK_LOGs0 (L"DLL Loader", L"Epic Overlay Disabled in 32-bit game to prevent deadlock");
+        SK_SetLastError (ERROR_MOD_NOT_FOUND);
+        hMod = nullptr;
+      }
+
+      // Windows Defender likes to deadlock in the Steam Overlay
+      else if (StrStrIW (compliant_path, L"Windows Defender"))
       {
         SK_SetLastError (ERROR_MOD_NOT_FOUND);
+        hMod = nullptr;
+      }
 
+      else if (bVulkanLayerDisabled)
+      {
+        SK_SetLastError (ERROR_MOD_NOT_FOUND);
+      
         hMod = nullptr;
       }
 

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of Special K.
  *
  * Special K is free software : you can redistribute it
@@ -36,6 +36,7 @@ using finish_pfn = void (WINAPI *)(void);
 #define SK_DI8_READ(type)  SK_DI8_Backend->markRead   (type);
 #define SK_DI8_WRITE(type) SK_DI8_Backend->markWrite  (type);
 #define SK_DI8_VIEW(type)  SK_DI8_Backend->markViewed (type);
+#define SK_DI8_HIDE(type)  SK_DI8_Backend->markHidden (type);
 
 
 #define DINPUT8_CALL(_Ret, _Call) {                                      \
@@ -390,7 +391,7 @@ CoCreateInstance_DI8 (
   _Out_ LPVOID   *ppv,
   _In_  LPVOID    pCallerAddr )
 {
-  SK_BootDI8      ();
+  SK_BootDI8 ();
 
   if (SK_GetDLLRole () == DLL_ROLE::DInput8)
   {
@@ -504,7 +505,7 @@ CoCreateInstanceEx_DI8 (
 
   SK_BootDI8        ();
   if (SK_GetDLLRole () == DLL_ROLE::DInput8)
-  { WaitForInit_DI8 ();                      }
+  { WaitForInit_DI8 ();                    }
 
   dll_log->Log ( L"[ DInput 8 ] [!] %s (%08" _L(PRIxPTR) L"h, %lu, {...}, ppvOut="
                                       L"%08" _L(PRIxPTR) L"h)"
@@ -613,8 +614,7 @@ di8_init_callback (finish_pfn finish)
   if (! SK_IsHostAppSKIM ())
   {
     SK_HookDI8 (nullptr);
-
-    WaitForInit_DI8 ();
+    WaitForInit_DI8 (  );
   }
 
   finish ();
@@ -1138,6 +1138,9 @@ IDirectInputDevice8_GetDeviceState_Detour ( LPDIRECTINPUTDEVICE8 This,
         std::fill ( std::begin (out->rgdwPOV),
                     std::end   (out->rgdwPOV),
                       std::numeric_limits <DWORD>::max () );
+
+        if (disabled_to_game)
+          SK_DI8_HIDE (sk_input_dev_type::Gamepad);
       }
 
       else
@@ -1180,6 +1183,9 @@ IDirectInputDevice8_GetDeviceState_Detour ( LPDIRECTINPUTDEVICE8 This,
         std::fill ( std::begin (out->rgdwPOV),
                     std::end   (out->rgdwPOV),
                       std::numeric_limits <DWORD>::max () );
+
+        if (disabled_to_game)
+          SK_DI8_HIDE (sk_input_dev_type::Gamepad);
       }
 
       else
@@ -1197,7 +1203,12 @@ IDirectInputDevice8_GetDeviceState_Detour ( LPDIRECTINPUTDEVICE8 This,
         memcpy (SK_Input_GetDI8Keyboard ()->state, lpvData, cbData);
 
       if (disabled_to_game || FAILED (hr))
+      {
         RtlZeroMemory (lpvData, cbData);
+
+        if (disabled_to_game)
+          SK_DI8_HIDE (sk_input_dev_type::Keyboard);
+      }
 
       else
         SK_DI8_VIEW (sk_input_dev_type::Keyboard);
@@ -1220,7 +1231,12 @@ IDirectInputDevice8_GetDeviceState_Detour ( LPDIRECTINPUTDEVICE8 This,
         memcpy (&SK_Input_GetDI8Mouse ()->state, lpvData, cbData);
 
       if (disabled_to_game || FAILED (hr))
+      {
         RtlZeroMemory (lpvData, cbData);
+
+        if (disabled_to_game)
+          SK_DI8_HIDE (sk_input_dev_type::Mouse);
+      }
 
       else
         SK_DI8_VIEW (sk_input_dev_type::Mouse);
@@ -1737,8 +1753,6 @@ SK_Input_PreHookDI8 (void)
 
     if (SK_GetModuleHandle (L"dinput.dll"))
       SK_Input_HookDI7  ();
-
-    SK_Input_Init       ();
   }
 
   else

@@ -1,4 +1,193 @@
-﻿24.1.24.2
+﻿24.1.31.2
+=========
+ + Fully revert initialization changes introduced in 24.1.27
+     (a7d133a4e186e66240e1f21a12734d934437b9ed) for compatibility
+
+24.1.31.1
+=========
+ + Added local injection version number to system registry
+ + Fixed SK's HW mouse cursor failing to show up when hovering certain windows
+
+24.1.31
+=======
+ + Reverted default state of "block mouse input while no game cursor is visible"
+    to disabled, because it interferes with games ability to show the cursor in
+      response to movement in UI screens.
+ + Fixed a few issues with mouse cursor sporadically appearing
+
+24.1.30.5
+=========
+ + Add 133 ms heartbeat message to wake SKIF and keep it redrawing when SK is
+     setup in "Continue Rendering" mode, in order to avoid the game losing VRR
+       during Alt-Tab (while injection service is running).
+
+24.1.30.4
+=========
+ + Spawn PresentMon worker thread if text OSD's FPS text is enabled in D3D12,
+     otherwise the VRR indicator will not work
+
+24.1.30.3
+=========
+ + Moved Raw Input input activity to the end of the API list since it is the
+     least likely API to be sampled every frame
+ + Continue tallying Raw Input mouse events while the mouse is blocked
+
+24.1.30.2
+=========
+ + Fixed issue preventing SDR users from using DXGI/Vulkan interop on NV GPUs
+
+24.1.30.1
+=========
+ + Added grayed-out input API state to control panel when SK is blocking an API
+    that the game is attempting to read
+
+24.1.30
+=======
+ + Re-introduced DXGI/D3D11 "wait for init" behavior when using global injection,
+     for compatibility with games like Sonic Frontiers.     
+
+       * (Wait For Init was removed in 24.1.27.x)
+
+24.1.29.x
+=========
+ [.10]+ Fixed race to initialize in Microsoft Store version of Firewatch when
+          activating Unity's game window at start.
+ [.9] + Always use 'Backspace' rather than localized key name for startup banner
+          keyboard combo.
+ [.9] + Only show PlayStation controller directions in the startup banner if an
+          appropriate controller is connected.
+ [.8] + Fixed Epic Game Store games not resolving their config directory correctly
+          after introducing SKIF-defined profile names 
+ [.7] + Fixed potential DLL loader deadlock during debug symbol loads
+ [.6] + Fixed uPlay Epic Game Store games not being detected as EGS due to uPlay
+          launcher not forwarding the -epic-app command line switch to the game
+ [.6] + Added support for SKIF-provided profile directories for config/log files
+ [.5] + Fixed Epic Game Store localized game name resolution sometimes using the
+          name of a game's DLC rather than the name of the game.
+ [.4] + Improved "Block Input when no cursor is visible" to rule-out false
+          positives caused by SK's own cursor.
+ [.4] + Cursor auto-hide works as intended when mouse input is constantly disabled
+          to the game (cursor will timeout and vanish when not hovering SK's UI)
+ [.3] + FalloutNV.exe works with local and global injection now, but please
+          avoid local injection if at all possible because it WILL break.
+ [.2] + Fixed various OpenGL and HID issues if user tries to use local injection
+          as dinput8.dll; highly discouraged and unreliable.
+ [.2] + Disable EOS overlay in 32-bit software so that it does not deadlock
+ [.1] + Turn off DontHookWndProc in Dragons Dogma Dark Arisen for compatibility
+          with DXVK
+ [.1] + Handle a possible Structured Exception in iSK_Logger::close (...) during
+          DLL unload.
+
+24.1.29
+=======
+ + Display XInput slot enablement/placeholding status in XInput slot tooltips
+ + Hide XInput Packet Sequencing debug info unless SK is actively keeping a
+     disconnected controller alive.
+ + Simplified XInput Slot checkboxes, and added a yellow state to indicate when
+     SK is blocking input to the game
+ + Expose PlayStation controller options previously only shown in control panel
+     when a game uses libScePad.dll.
+
+    >> All (wired) PlayStation controller users now have access to them, but
+         some (trackpad remapping) still only show up in games using libScePad.
+
+24.1.28.6
+=========
+ + Avoid requesting new (unchanged) HID Preparsed Data every time a PlayStation
+     controller is polled to reduce input polling overhead.
+ + Forward a game's XInput poll requests through SK's Steam-Free XInput DLL
+     if [Input.Steam] Disable=true is set, so that Steam cannot screw with it.
+
+24.1.28.5
+=========
+ + Added Steam Input auto-bypass: Copies hid.dll, setupapi.dll, kernel32.dll
+     from system directory to <SK_Install>\Drivers\{HID|SetupAPI|Kernel32}\...
+
+   >> This prevents Steam Input from intentionally breaking the APIs used to
+        communicate with input devices without using their proprietary API.
+
+    * PlayStation controller features in SK now work if Steam Input is enabled.
+
+24.1.28.4
+=========
+ + Added support for muting/unmuting games using a DualSense's mute button
+ + Added support for opening SK's control panel using the PlayStation button
+ + Removed Waitable SwapChain option from control panel; if you -really- want,
+     it can still be configured manaully using SK's INI.
+     
+    >> Waitable SwapChains are discouraged, use Reflex or Latent Sync instead.
+ 
+24.1.28.x
+=========
+ [.3] + Added Presentation Interval Clamp setting to SwapChain settings;
+          clamping is disabled if user manually sets an interval outside of
+            the VRR compatible clamp range: [0,1]
+ [.2] + Added "VRR" to compact FPS text in OSD, if G-Sync is active
+ [.1] + Prevent showing SwapChain settings for multiple APIs when SK is running
+          in a layered environment (e.g. DXVK on DXGI, is both Vulkan and D3D11).
+
+24.1.28
+=======
+ + Changed the default mouse capture behavior when the control pane is open;
+     unless a game is showing the Windows cursor, mouse input while the cursor
+       is -not- over the control panel will be blocked.
+ + Added support for enumerating/hot-plugging PlayStation controllers w/ HID
+
+    >> Will be used for native UI control w/o XInput, and to bind special
+         buttons such as Dual Sense's mute button to mute/unmute the game.
+
+      * This functionality already exists, but only for games that use
+          SONY's native input API.
+
+24.1.27.3
+=========
+ + Eliminate the need for an injection delay when launching DOOM Eternal
+
+24.1.27.2
+=========
+ + Added Window thread activity to unresponsive TopMost removal logic, since
+     stupid engines like Unreal stop processing window messages while playing
+       full motion video.
+ + Removed debug log spam related to window topmost state
+
+24.1.27.1
+=========
+ + Changed Xbox game test to use \Content\ in game executable path, and
+     formally blacklist gamelaunchhelper.exe
+ + Added idTechLauncher.exe to injection blacklist so that injection into
+     DOOM Eternal works reliably
+ + Added 5 second injection delay to DOOM Eternal
+ + Enable Vulkan Bridge for DOOM Eternal by default so non-HDR users can
+     also use Special K :)
+ + Moved end-of-frame TopMost status check into the thread added in 24.1.27
+
+24.1.27
+=======
+ + Added a thread that runs every 250 ms to remove TopMost status from games
+     if they have stopped drawing frames, so that users don't get stuck with
+       game windows that cover the full screen, are top-most and unresponsive.
+
+24.1.26.x
+=========
+ [.3] + Fixed D3D11 HUDless screenshots not snapping early enough, because
+          the number of screenshot stages changed.
+ [.2] + Fixed missing HUDless screenshot keybind in control panel, because
+          the number of screenshot keybinds changed.
+ [.1] + Turn off XInput auto slot-0 assignment if the UI slot is not valid
+          (i.e. user has disabled UI control by setting UISlot=4)
+
+24.1.26
+=======
+ + Merge pull request #134 from MapleHinata/main
+    * Enable Streamline workarounds for Yakuza: Infinite Wealth #134
+ + Merge pull request #133 from Nustat0/fix-saving-config-for-ddraw-d3d8
+    * Fix various config settings not saving for local D3D8/DDraw injection
+ + Fixed problems in latest versions of Yuzu where SK hooks Qt's OpenGL test
+     window rather than the actual render window (i.e. no UI mouse input)
+ + Fixed not being able to set Borderless mode in the control panel if
+     Fullscreen Window mode is set in INI (it should be implicitly borderless)
+
+24.1.24.2
 =========
  + Fixed API detection issues in Stardew Valley
  + Improved support for UWP games on Microsoft Store

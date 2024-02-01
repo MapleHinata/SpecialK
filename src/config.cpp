@@ -248,7 +248,8 @@ SK_GetCurrentGameID (void)
           { L"Cyberpunk2077.exe",                      SK_GAME_ID::Cyberpunk2077                },
           { L"CrashReport.exe",                        SK_GAME_ID::CrashReport                  },
           { L"StreetFighter6.exe",                     SK_GAME_ID::StreetFighter6               },
-          { L"Stardew Valley.exe",                     SK_GAME_ID::StardewValley                }
+          { L"Stardew Valley.exe",                     SK_GAME_ID::StardewValley                },
+          { L"DOOMEternalx64vk.exe",                   SK_GAME_ID::DOOMEternal                  }
         };
 
     first_check  = false;
@@ -841,7 +842,6 @@ struct {
     sk::ParameterStringW* rotation                = nullptr;
     sk::ParameterBool*    test_present            = nullptr;
     sk::ParameterBool*    debug_layer             = nullptr;
-    sk::ParameterBool*    safe_fullscreen         = nullptr;
     sk::ParameterBool*    enhanced_depth          = nullptr;
     sk::ParameterBool*    deferred_isolation      = nullptr;
     sk::ParameterInt*     msaa_samples            = nullptr;
@@ -1774,7 +1774,6 @@ auto DeclKeybind =
                                                          L" UpperFieldFirst )",                                        dll_ini,         L"Render.DXGI",           L"ScanlineOrder"),
     ConfigEntry (render.dxgi.rotation,                   L"Screen Rotation (DontCare | Identity | 90 | 180 | 270 )",   dll_ini,         L"Render.DXGI",           L"Rotation"),
     ConfigEntry (render.dxgi.test_present,               L"Test SwapChain Presentation Before Actually Presenting",    dll_ini,         L"Render.DXGI",           L"TestSwapChainPresent"),
-  //ConfigEntry (render.dxgi.safe_fullscreen,            L"Prevent DXGI Deadlocks in Improperly Written Games",        dll_ini,         L"Render.DXGI",           L"SafeFullscreenMode"),
     ConfigEntry (render.dxgi.enhanced_depth,             L"Use 32-bit Depth + 8-bit Stencil + 24-bit Padding",         dll_ini,         L"Render.DXGI",           L"Use64BitDepthStencil"),
     ConfigEntry (render.dxgi.deferred_isolation,         L"Isolate D3D11 Deferred Context Queues instead of Tracking"
                                                          L" in Immediate Mode.",                                       dll_ini,         L"Render.DXGI",           L"IsolateD3D11DeferredContexts"),
@@ -2324,7 +2323,8 @@ auto DeclKeybind =
         config.apis.dxgi.d3d11.hook           = false;
         config.apis.d3d9ex.hook               = false;
         config.apis.OpenGL.hook               = false;
-        config.window.dont_hook_wndproc       = true;
+        config.window.dont_hook_wndproc       = false;
+        window.dont_hook_wndproc->store (config.window.dont_hook_wndproc);
         break;
 
 
@@ -2661,7 +2661,7 @@ auto DeclKeybind =
         // The Vulkan executable is simply bg3.exe,
         //   D3D11 is bg3_dx11.exe
         bool bVulkan =
-          StrStrIW (SK_GetHostPath (), L"bg3.exe");
+          StrStrIW (SK_GetHostApp (), L"bg3.exe");
 
         if (bVulkan)
         {
@@ -3347,7 +3347,6 @@ auto DeclKeybind =
         config.compatibility.reshade_mode = false;
         break;
 
-      
       case SK_GAME_ID::StardewValley:
         // Game needs to be told that it is OpenGL, or it won't inject...
         config.compatibility.
@@ -3358,6 +3357,11 @@ auto DeclKeybind =
         apis.last_known->store     ((int)config.apis.last_known     );
         apis.OpenGL.hook->store    (     config.apis.OpenGL.hook    );
         apis.d3d11.hook->store     (     config.apis.dxgi.d3d11.hook);
+        break;
+
+      case SK_GAME_ID::DOOMEternal:
+        config.apis.NvAPI.vulkan_bridge   = 1;
+        config.system.global_inject_delay = 0.0f;
         break;
 
       case SK_GAME_ID::AlanWake2:
@@ -3936,8 +3940,6 @@ auto DeclKeybind =
   render.dxgi.test_present->load         (config.render.dxgi.test_present);
   render.dxgi.swapchain_wait->load       (config.render.framerate.swapchain_wait);
 
-//render.dxgi.safe_fullscreen->load      (config.render.dxgi.safe_fullscreen);
-
   render.dxgi.enhanced_depth->load       (config.render.dxgi.enhanced_depth);
   render.dxgi.deferred_isolation->load   (config.render.dxgi.deferred_isolation);
   render.dxgi.skip_present_test->load    (config.render.dxgi.present_test_skip);
@@ -4179,6 +4181,12 @@ auto DeclKeybind =
   window.dont_hook_wndproc->load   (config.window.dont_hook_wndproc);
   window.activate_at_start->load   (config.window.activate_at_start);
   window.treat_fg_as_active->load  (config.window.treat_fg_as_active);
+
+  if (config.window.fullscreen && (! config.window.borderless))
+  {
+    SK_LOGi0 (L"Invalid Combination of Fullscreen + Not Borderless, forcing Borderless!");
+    config.window.borderless = true;
+  }
 
 
   // Oh boy, let the fun begin :)
@@ -4628,7 +4636,7 @@ auto DeclKeybind =
 
   if (config.steam.appid != 0)
   {
-    if (config.steam.appid != 1157970)
+    if (config.steam.appid != SPECIAL_KILLER_APPID)
     {
 #if 0
       // Non-Steam Games: Ignore this to prevent general weirdness.
@@ -5397,6 +5405,10 @@ SK_SaveConfig ( std::wstring name,
   input.gamepad.steam.ui_slot->store          (config.input.gamepad.steam.ui_slot);
   input.gamepad.steam.disable->store          (config.input.gamepad.steam.disabled_to_game);
 
+  // Turn off auto-slot assignment if the UI slot is invalid
+  if (config.input.gamepad.xinput.ui_slot < 0 || config.input.gamepad.xinput.ui_slot > 3)
+      config.input.gamepad.xinput.auto_slot_assign = false;
+
   std::wstring xinput_assign;
   std::wstring xinput_disable;
 
@@ -5579,8 +5591,12 @@ SK_SaveConfig ( std::wstring name,
 
   render.framerate.override_cpu_count->store  (config.render.framerate.override_num_cpus);
 
-  if ( SK_IsInjected () || (SK_GetDLLRole () & DLL_ROLE::DInput8) ||
-      (SK_GetDLLRole () & DLL_ROLE::D3D9 || SK_GetDLLRole () & DLL_ROLE::DXGI) )
+  if (  SK_IsInjected ()                       ||
+      ( SK_GetDLLRole () & DLL_ROLE::DInput8 ) ||
+      ( SK_GetDLLRole () & DLL_ROLE::D3D9    ) ||
+      ( SK_GetDLLRole () & DLL_ROLE::D3D8    ) ||
+      ( SK_GetDLLRole () & DLL_ROLE::DDraw   ) ||
+      ( SK_GetDLLRole () & DLL_ROLE::DXGI    ) )
   {
     render.framerate.wait_for_vblank->store   (config.render.framerate.wait_for_vblank);
     render.framerate.prerender_limit->store   (config.render.framerate.pre_render_limit);
@@ -5666,6 +5682,8 @@ SK_SaveConfig ( std::wstring name,
 
     if (  SK_IsInjected ()                       ||
         ( SK_GetDLLRole () & DLL_ROLE::DInput8 ) ||
+        ( SK_GetDLLRole () & DLL_ROLE::D3D8    ) ||
+        ( SK_GetDLLRole () & DLL_ROLE::DDraw   ) ||
         ( SK_GetDLLRole () & DLL_ROLE::DXGI    ) )
     {
       nvidia.reflex.enable->store                 (config.nvidia.reflex.enable);
@@ -5785,7 +5803,6 @@ SK_SaveConfig ( std::wstring name,
       render.dxgi.fake_fullscreen_mode->store (config.render.dxgi.fake_fullscreen_mode);
       render.dxgi.debug_layer->store          (config.render.dxgi.debug_layer);
       render.dxgi.allow_d3d12_footguns->store (config.render.dxgi.allow_d3d12_footguns);
-    //render.dxgi.safe_fullscreen->store      (config.render.dxgi.safe_fullscreen);
       render.dxgi.enhanced_depth->store       (config.render.dxgi.enhanced_depth);
       render.dxgi.deferred_isolation->store   (config.render.dxgi.deferred_isolation);
       render.dxgi.skip_present_test->store    (config.render.dxgi.present_test_skip);
@@ -5913,7 +5930,7 @@ SK_SaveConfig ( std::wstring name,
 
 
   // Special K's AppID belongs to Special K, not this game!
-  if (config.steam.appid == 1157970)
+  if (config.steam.appid == SPECIAL_KILLER_APPID)
   {   config.steam.appid               = 0;
       config.steam.auto_inject         = false;
       config.steam.force_load_steamapi = false;
@@ -6005,6 +6022,31 @@ SK_SaveConfig ( std::wstring name,
   init_delay->store                            (config.system.global_inject_delay);
   return_to_skif->store                        (config.system.return_to_skif);
   version->store                               (SK_GetVersionStrW ());
+
+  if (! SK_IsInjected ())
+  {
+    HKEY     hKey;
+    LSTATUS lsKey =
+      RegCreateKeyW (HKEY_CURRENT_USER,
+                       LR"(SOFTWARE\Kaldaien\Special K\Local)",
+                         &hKey);
+    if (ERROR_SUCCESS == lsKey)
+    {
+      LSTATUS lsRegSet = RegSetValueExW (
+             hKey, SK_GetModuleFullName (SK_GetDLL ()).c_str (),
+                0, REG_SZ, (LPBYTE)        SK_GetVersionStrW (),
+                            (DWORD)wcslen (SK_GetVersionStrW ()) * sizeof (wchar_t) );
+
+      if (lsRegSet != ERROR_SUCCESS)
+      {
+        SK_LOGi0 (
+          L"Failed to store local injection record in system registry! Err=%x",
+          lsRegSet );
+      }
+
+      RegCloseKey (hKey);
+    }
+  }
 
   skif_autostop_behavior->store                (config.skif.auto_stop_behavior);
 
@@ -6262,7 +6304,10 @@ SK_Keybind::parse (void)
            i != VK_SHIFT    && i != VK_OEM_PLUS && i != VK_OEM_MINUS &&
            i != VK_LSHIFT   && i != VK_RSHIFT   &&
            i != VK_LCONTROL && i != VK_RCONTROL &&
-           i != VK_LMENU    && i != VK_RMENU    && i != VK_ADD // Num Plus
+           i != VK_LMENU    && i != VK_RMENU    && i != VK_ADD   && // Num Plus
+           i != VK_BACK     && i != VK_HOME     && i != VK_END   &&
+           i != VK_DELETE   && i != VK_INSERT   && i != VK_PRIOR &&
+           i != VK_NEXT
          )
       {
         _PushHumanToVirtual (name, sk::narrow_cast <BYTE> (i));
@@ -6283,7 +6328,13 @@ SK_Keybind::parse (void)
     _PushHumanToVirtual (L"Right Alt",   sk::narrow_cast <BYTE> (VK_RMENU));
     _PushHumanToVirtual (L"Left Ctrl",   sk::narrow_cast <BYTE> (VK_LCONTROL));
     _PushHumanToVirtual (L"Right Ctrl",  sk::narrow_cast <BYTE> (VK_RCONTROL));
-
+    _PushHumanToVirtual (L"Backspace",   sk::narrow_cast <BYTE> (VK_BACK));
+    _PushHumanToVirtual (L"Home",        sk::narrow_cast <BYTE> (VK_HOME));
+    _PushHumanToVirtual (L"End",         sk::narrow_cast <BYTE> (VK_END));
+    _PushHumanToVirtual (L"Insert",      sk::narrow_cast <BYTE> (VK_INSERT));
+    _PushHumanToVirtual (L"Delete",      sk::narrow_cast <BYTE> (VK_DELETE));
+    _PushHumanToVirtual (L"Page Up",     sk::narrow_cast <BYTE> (VK_PRIOR));
+    _PushHumanToVirtual (L"Page Down",   sk::narrow_cast <BYTE> (VK_NEXT));
 
     _PushVirtualToHuman (sk::narrow_cast <BYTE> (VK_CONTROL),   L"Ctrl");
     _PushVirtualToHuman (sk::narrow_cast <BYTE> (VK_MENU),      L"Alt");
@@ -6296,6 +6347,13 @@ SK_Keybind::parse (void)
     _PushVirtualToHuman (sk::narrow_cast <BYTE> (VK_RMENU),     L"Right Alt");
     _PushVirtualToHuman (sk::narrow_cast <BYTE> (VK_LCONTROL),  L"Left Ctrl");
     _PushVirtualToHuman (sk::narrow_cast <BYTE> (VK_RCONTROL),  L"Right Ctrl");
+    _PushVirtualToHuman (sk::narrow_cast <BYTE> (VK_BACK),      L"Backspace");
+    _PushVirtualToHuman (sk::narrow_cast <BYTE> (VK_HOME),      L"Home");
+    _PushVirtualToHuman (sk::narrow_cast <BYTE> (VK_END),       L"End");
+    _PushVirtualToHuman (sk::narrow_cast <BYTE> (VK_INSERT),    L"Insert");
+    _PushVirtualToHuman (sk::narrow_cast <BYTE> (VK_DELETE),    L"Delete");
+    _PushVirtualToHuman (sk::narrow_cast <BYTE> (VK_PRIOR),     L"Page Up");
+    _PushVirtualToHuman (sk::narrow_cast <BYTE> (VK_NEXT),      L"Page Down");
 
     _PushHumanToVirtual (L"Num Plus", sk::narrow_cast <BYTE> (VK_ADD));
     _PushVirtualToHuman (             sk::narrow_cast <BYTE> (VK_ADD), L"Num Plus");
@@ -6433,15 +6491,25 @@ SK_AppCache_Manager::loadAppCacheForExe (const wchar_t* wszExe)
 
   // The app name is literally in the command line, but it is best we
   //   read the .egstore manifest for consistency
-  else if (StrStrIA (GetCommandLineA (), "-epicapp="))
+
+  else if ( StrStrIA (GetCommandLineA (), "-epicapp=") ||
+                         PathFileExistsW (L".egstore") ||
+                      PathFileExistsW (L"../.egstore") ||
+                      StrStrIW (wszExe, L"Epic Games") )
+
+    // uPlay's launcher does not forward the command line, so fallback
+    //   to a directory check if "-epicapp=" is undefined.
+
   {
-    // Epic games might have multiple manifests, break-out early after finding the first one.
+    // Epic games might have multiple manifests.
+    //
+    //  * Break-out early after finding the first one...
     //
     bool found_manifest = false;
 
     try {
       std::filesystem::path path =
-        std::wstring (wszExe);
+        std::filesystem::path (wszExe).lexically_normal ();
 
       while (! std::filesystem::equivalent ( path.parent_path    (),
                                              path.root_directory () ) )
@@ -6521,7 +6589,7 @@ SK_AppCache_Manager::loadAppCacheForExe (const wchar_t* wszExe)
         }
 
         path =
-          path.parent_path ();
+          path.parent_path ().lexically_normal ();
       }
     }
 
@@ -6601,6 +6669,48 @@ SK_AppCache_Manager::getAppNameFromPath (const wchar_t* wszPath) const
   if (uiAppID != 0)
   {
     return getAppNameFromID (uiAppID);
+  }
+
+  CRegKey hkAppCacheRoot;
+          hkAppCacheRoot.Open (HKEY_CURRENT_USER, LR"(Software\Kaldaien\Special K\Profiles)");
+
+  if ((intptr_t)hkAppCacheRoot.m_hKey > 0)
+  {
+    std::filesystem::path path =
+      std::filesystem::path (wszPath).lexically_normal ();
+
+    try
+    {
+      wchar_t wszProfileName [MAX_PATH + 2] = { };
+
+      while (! std::filesystem::equivalent ( path.parent_path    (),
+                                             path.root_directory () ) )
+      {
+        *wszProfileName = L'\0';
+
+        ULONG ulProfileLen = MAX_PATH;
+
+        if ( ERROR_SUCCESS ==
+               hkAppCacheRoot.QueryStringValue ( path.c_str (),
+                                                 wszProfileName,
+                                                   &ulProfileLen )
+           )
+        {
+          return
+            wszProfileName;
+        }
+
+        path =
+          path.parent_path ().lexically_normal ();
+      }
+    }
+
+    catch (const std::exception& e)
+    {
+      SK_LOGs0 ( L" AppCache ",
+                 L"AppCache Parse Failure: %hs during Profile Name Lookup",
+                                 e.what () );
+    }
   }
 
   return L"";
@@ -6740,7 +6850,7 @@ SK_AppCache_Manager::getConfigPathFromAppPath (const wchar_t* wszPath) const
   }
 
   std::filesystem::path path =
-                     wszPath;
+    std::filesystem::path (wszPath).lexically_normal ();
 
   try
   {
@@ -6782,7 +6892,7 @@ SK_AppCache_Manager::getConfigPathFromAppPath (const wchar_t* wszPath) const
       }
 
       path =
-        path.parent_path ();
+        path.parent_path ().lexically_normal ();
     }
   }
 
@@ -6791,6 +6901,56 @@ SK_AppCache_Manager::getConfigPathFromAppPath (const wchar_t* wszPath) const
     SK_LOGs0 ( L" AppCache ",
                L"Appcache Parse Failure: %hs during Epic Name Lookup",
                                e.what () );
+  }
+
+  CRegKey hkAppCacheRoot;
+          hkAppCacheRoot.Open (HKEY_CURRENT_USER, LR"(Software\Kaldaien\Special K\Profiles)");
+
+  if ((intptr_t)hkAppCacheRoot.m_hKey > 0)
+  {
+    path =
+      std::filesystem::path (wszPath).lexically_normal ();
+
+    try
+    {
+      wchar_t wszProfileName [MAX_PATH + 2] = { };
+
+      while (! std::filesystem::equivalent ( path.parent_path    (),
+                                             path.root_directory () ) )
+      {
+        *wszProfileName = L'\0';
+
+        ULONG ulProfileLen = MAX_PATH;
+
+        if ( ERROR_SUCCESS ==
+               hkAppCacheRoot.QueryStringValue ( path.c_str (),
+                                                 wszProfileName,
+                                                   &ulProfileLen )
+           )
+        {
+          auto ret =
+            getConfigPathForGenericApp (wszProfileName);
+
+          // ret should never be empty
+          SK_ReleaseAssert (! ret.empty ());
+          
+          if (! ret.empty ())
+            return ret;
+
+          break;
+        }
+
+        path =
+          path.parent_path ();
+      }
+    }
+
+    catch (const std::exception& e)
+    {
+      SK_LOGs0 ( L" AppCache ",
+                 L"AppCache Parse Failure: %hs during Profile Name Lookup",
+                                 e.what () );
+    }
   }
 
   return
@@ -6875,6 +7035,71 @@ SK_AppCache_Manager::getConfigPathForEpicApp (const char* szEpicApp) const
   std::wstring path = SK_GetNaiveConfigPath ();
   std::wstring name =
     SK_UTF8ToWideChar (SK::EOS::AppName ());
+
+  // Non-trivial name = custom path, remove the old-style <program.exe>
+  if (! name.empty ())
+  {
+    std::wstring original_dir (path);
+
+    size_t pos = 0;
+    if (  (pos = path.find (SK_GetHostApp (), pos)) != std::wstring::npos)
+    {
+      std::wstring       host_app (SK_GetHostApp ());
+      path.replace (pos, host_app.length (), L"\0");
+    }
+
+    std::erase_if ( name,      [](wchar_t tval) {
+      return invalid_file_chars.contains (tval);} );
+
+    path =
+      SK_FormatStringW ( LR"(%s\%s\)",
+                         path.c_str (),
+                         name.c_str () );
+
+    SK_StripTrailingSlashesW (path.data ());
+
+    if (recursing)
+      return path;
+
+    std::error_code                                  err;
+    if (std::filesystem::is_directory (original_dir, err))
+    {
+      std::wstring old_ini =
+                   dll_ini != nullptr ? dll_ini->get_filename ()
+                                      : L"";
+
+      recursing         = true;
+      SK_GetConfigPathEx (true);
+      SK_LoadConfigEx    (L"" );
+      recursing         = false;
+
+      // We've already parsed/written the new file, delete the old one
+      if ((! old_ini.empty ())  &&
+             dll_ini != nullptr &&
+          _wcsicmp ( old_ini.c_str (), dll_ini->get_filename ()))
+        DeleteFileW (old_ini.c_str ());
+
+      SK_RecursiveMove ( original_dir.c_str (),
+                                 path.c_str (), false );
+    }
+  }
+
+  return
+    path;
+}
+
+std::wstring
+SK_AppCache_Manager::getConfigPathForGenericApp (const wchar_t* wszGenericAppName) const
+{
+  static bool recursing = false;
+
+  // If no AppCache (probably not a Steam game), or opting-out of central repo,
+  //   then don't parse crap and just use the traditional path.
+  if (! config.system.central_repository)
+    return SK_GetNaiveConfigPath ();
+
+  std::wstring path = SK_GetNaiveConfigPath ();
+  std::wstring name = wszGenericAppName;
 
   // Non-trivial name = custom path, remove the old-style <program.exe>
   if (! name.empty ())

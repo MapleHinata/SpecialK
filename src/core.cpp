@@ -698,9 +698,9 @@ extern void BasicInit (void);
 
     if (SK_GetModuleHandle (L"dinput.dll"))
       SK_Input_HookDI7  ();
-
-    SK_Input_Init       ();
   }
+
+  SK_Input_Init ();
 
   void
      __stdcall SK_InitFinishCallback (void);
@@ -865,6 +865,17 @@ SK_InitFinishCallback (void)
           config.render.framerate.target_fps
       );
       break;
+    default:
+    {
+      HMODULE hModEOSOVH =
+        GetModuleHandleW (L"EOSOVH-Win32-Shipping.dll");
+
+      if (hModEOSOVH)
+      {
+        MoveFileW (  SK_GetModuleFullName (hModEOSOVH).        c_str (),
+                    (SK_GetModuleFullName (hModEOSOVH) + L"_").c_str () );
+      }
+    } break;
 #endif
   }
 
@@ -2475,7 +2486,7 @@ SK_Win32_CleanupDummyWindow (HWND hwnd)
 void
 SK_Log_CleanupLogs (void)
 {
-  if (steam_log->lines <= 2)
+  if (steam_log->lines <= 4)
       steam_log->lines =  0;
 
   if (epic_log->lines < 2)
@@ -2491,10 +2502,94 @@ SK_Log_CleanupLogs (void)
   game_debug->close ();
   epic_log->close   ();
   steam_log->close  ();
+  tex_log->close    ();
 }
 
 extern HWND SK_Inject_GetFocusWindow (void);
 extern void SK_Inject_SetFocusWindow (HWND hWndFocus);
+
+void
+SK_Inject_PostHeartbeatToSKIF (void)
+{
+  static HWND hWndSKIF =
+    FindWindow (L"SK_Injection_Frontend", nullptr);
+
+  if (hWndSKIF == nullptr)
+  {
+    // This isn't the correct window since SKIF was overhauled, but
+    //   it at least gives us the process that owns the window we need...
+    hWndSKIF =
+      FindWindow (L"SKIF_ImGuiWindow", nullptr);
+  
+    DWORD                                dwPidOfSKIF = 0;
+    GetWindowThreadProcessId (hWndSKIF, &dwPidOfSKIF);
+  
+    EnumWindows ( []( HWND   hWnd,
+                      LPARAM lParam ) -> BOOL
+    {
+      DWORD                                dwPID = 0;
+      if (GetWindowThreadProcessId (hWnd, &dwPID))
+      {
+        if (dwPID != (DWORD)lParam)
+          return TRUE;
+  
+        if (SK_GetWindowLongPtrW (hWnd, GWL_EXSTYLE) & WS_EX_APPWINDOW)
+        {
+          // Success, we found the app window!
+          hWndSKIF = hWnd;
+  
+          SK_SetWindowLongPtrW (   hWnd, GWL_EXSTYLE,
+            SK_GetWindowLongPtrW ( hWnd, GWL_EXSTYLE ) & ~WS_EX_NOACTIVATE );
+  
+          return FALSE;
+        }
+      }
+  
+      return TRUE;
+    }, (LPARAM)dwPidOfSKIF);
+  }
+
+  // If done constantly (true), it helps with alt-tab
+  if (SK_Inject_IsHookActive ()) 
+  { // If done only when hook is running, it fixes periodic VRR loss,
+    //   but alt-tab can still flicker.
+    if (hWndSKIF != nullptr && IsWindow (hWndSKIF))
+    {
+      DWORD                                dwPid = 0x0;
+      GetWindowThreadProcessId (hWndSKIF, &dwPid);
+    
+      if ( dwPid != 0x0 &&
+           dwPid != GetCurrentProcessId () )
+      {
+        static DWORD
+            dwLastHeartbeat = 0;
+        if (dwLastHeartbeat < SK_timeGetTime () - 133)
+        {   dwLastHeartbeat = SK_timeGetTime ();
+
+          // Wake SKIF up and make it redraw
+          PostMessage (hWndSKIF, WM_NULL, 0x0, 0x0);
+        }
+      }
+    }
+
+    // SKIF's not running, we'll re-check every 1250 ms
+    else
+    {
+      static DWORD
+          dwLastWindowCheck = 0;
+      if (dwLastWindowCheck < SK_timeGetTime () - 1250)
+      {
+        hWndSKIF = nullptr;
+      }
+
+      else
+      {
+        // Deliberately wrong window, it will be the same PID
+        hWndSKIF = game_window.hWnd;
+      }
+    }
+  }
+}
 
 void
 SK_Inject_ReturnToSKIF (void)
@@ -2697,8 +2792,7 @@ SK_ShutdownCore (const wchar_t* backend)
 #endif
   }
 
-  SK_AutoClose_LogEx (game_debug, game);
-  SK_AutoClose_LogEx (dll_log,    dll);
+  SK_AutoClose_LogEx (dll_log, dll);
 
   if (SK_GetFramesDrawn () > 0)
   {
@@ -3038,13 +3132,21 @@ SK_FrameCallback ( SK_RenderBackend& rb,
 
             if (config.window.activate_at_start || config.window.background_render)
             {
+#define SK_SAFE_CALLWNDPROC(Msg,wParam,lParam) \
+ SK_COMPAT_SafeCallProc (&game_window, game_window.hWnd, (Msg), (WPARAM)(wParam), (LPARAM)(lParam));
+
               // Activate the game window one time
               //   (workaround wonkiness from splash screens, etc.)
               SK_RunOnce (
               {
-                game_window.CallProc (game_window.hWnd, WM_ACTIVATEAPP, TRUE,                      0);
-                game_window.CallProc (game_window.hWnd, WM_ACTIVATE,    MAKEWPARAM (WA_ACTIVE, 0), 0);
-                game_window.CallProc (game_window.hWnd, WM_SETFOCUS,    0,                         0);
+                extern LRESULT WINAPI
+                SK_COMPAT_SafeCallProc (sk_window_s* pWin, HWND hWnd_, UINT Msg, WPARAM wParam, LPARAM lParam);
+
+                SK_SAFE_CALLWNDPROC (WM_ACTIVATEAPP, TRUE, 0);
+                SK_SAFE_CALLWNDPROC (WM_SETFOCUS,       0, 0);
+
+                // Activate the window
+                ShowWindowAsync (game_window.hWnd, SW_SHOW);
 
                 if (!    SetForegroundWindow (game_window.hWnd))
                   SK_RealizeForegroundWindow (game_window.hWnd);
@@ -3405,6 +3507,9 @@ SK_BackgroundRender_EndFrame (void)
         rb.isTrueFullscreen ();
   if (! fullscreen_last_frame)
   {
+    bool implicit_smart_always_on_top =
+      (config.window.always_on_top == NoPreferenceOnTop && rb.isFakeFullscreen ());
+
     static bool last_foreground = false;
 
     DWORD     dwProcessId = GetCurrentProcessId ();
@@ -3453,17 +3558,27 @@ SK_BackgroundRender_EndFrame (void)
           }
         }
 
-        if (config.window.always_on_top == PreventAlwaysOnTop)
+        if (config.window.always_on_top == PreventAlwaysOnTop || implicit_smart_always_on_top)
           SK_DeferCommand ("Window.TopMost false");
       }
     }
 
     else
     {
-      if (! std::exchange (last_foreground, true) && config.window.always_on_top >= AlwaysOnTop)
+      if ((! std::exchange (last_foreground, true)) && (config.window.always_on_top >= AlwaysOnTop || implicit_smart_always_on_top))
         SK_DeferCommand ("Window.TopMost true");
     }
   }
+
+  //
+  // If SKIF is in the foreground, and SK is set to background render mode,
+  //   then post a message to SKIF to keep it drawing constantly so that VRR
+  //     in the game does not disengage.
+  //
+  //  The minor overhead from SKIF drawing constantly is much less than the
+  //    performance oddities caused by the game periodically losing DirectFlip.
+  //
+  SK_Inject_PostHeartbeatToSKIF ();
 }
 
 void
@@ -3798,40 +3913,8 @@ SK_EndBufferSwap (HRESULT hr, IUnknown* device, SK_TLS* pTLS)
 #endif
 
 
-  const bool smart_always_on_top =
-    config.window.always_on_top == SmartAlwaysOnTop  ||
-   (config.window.always_on_top == NoPreferenceOnTop && rb.isFakeFullscreen ());
-
-  // Catch sneaky games that change their TopMost status unrelated to window
-  //   activation state...
-  if (config.window.always_on_top != NoPreferenceOnTop &&
-           (! smart_always_on_top)) // It really is smart
-  {
-    bool bTopMost =
-      SK_Window_IsTopMost (game_window.hWnd);
-
-    switch (config.window.always_on_top)
-    {
-      case PreventAlwaysOnTop:
-        if (bTopMost)
-        {
-          SK_LOG1 ( ( L"Game Window was TopMost, removing..." ), L"Window Mgr" );
-
-          SK_DeferCommand ("Window.TopMost 0");
-        }
-        break;
-      case AlwaysOnTop:
-        if (! bTopMost)
-        {
-          SK_LOG1 ( ( L"Game Window was not TopMost, applying..." ), L"Window Mgr" );
-
-          SK_DeferCommand ("Window.TopMost 1");
-        }
-        break;
-      default:
-        break;
-    }
-  }
+  extern void SK_Window_CreateTopMostFixupThread (void);
+              SK_Window_CreateTopMostFixupThread ();
 
 
   if (SK_DXGI_IsTrackingBudget ())

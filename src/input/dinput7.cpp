@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of Special K.
  *
  * Special K is free software : you can redistribute it
@@ -34,9 +34,10 @@ extern bool nav_usable;
 
 using finish_pfn = void (WINAPI *)(void);
 
-
-#define SK_DI7_READ(type)  SK_DI7_Backend->markRead  (type);
-#define SK_DI7_WRITE(type) SK_DI7_Backend->markWrite (type);
+#define SK_DI7_READ(type)  SK_DI7_Backend->markRead   (type);
+#define SK_DI7_WRITE(type) SK_DI7_Backend->markWrite  (type);
+#define SK_DI7_VIEW(type)  SK_DI7_Backend->markViewed (type);
+#define SK_DI7_HIDE(type)  SK_DI7_Backend->markHidden (type);
 
 
 #define DINPUT7_CALL(_Ret, _Call) {                                     \
@@ -118,11 +119,9 @@ DirectInputCreateEx ( HINSTANCE hinst,
                       LPVOID   *ppvOut,
                       LPUNKNOWN punkOuter )
 {
-  //if (SK_GetDLLRole () == DLL_ROLE::DInput7)
-  {
-    SK_BootDI7      ();
-    WaitForInit_DI7 ();
-  }
+           SK_BootDI7 ();
+      WaitForInit_DI7 ();
+  
 
   dll_log->Log ( L"[ DInput 7 ] [!] %s (%08" _L(PRIxPTR) L"h, %lu, {...}, ppvOut="
                                       L"%08" _L(PRIxPTR) L"h, %08" _L(PRIxPTR) L"h) - "
@@ -194,11 +193,8 @@ DirectInputCreateA ( HINSTANCE       hinst,
                      LPDIRECTINPUTA* lplpDirectInput,
                      LPUNKNOWN       punkOuter )
 {
-  //if (SK_GetDLLRole () == DLL_ROLE::DInput7)
-  {
-    SK_BootDI7      ();
-    WaitForInit_DI7 ();
-  }
+           SK_BootDI7 ();
+      WaitForInit_DI7 ();
 
   dll_log->Log ( L"[ DInput 7 ] [!] %s (%08" _L(PRIxPTR) L"h, %lu, {...}, "
                       L"lplpDirectInput=%08" _L(PRIxPTR) L"h, %08" _L(PRIxPTR)
@@ -244,11 +240,8 @@ DirectInputCreateW ( HINSTANCE       hinst,
                      LPDIRECTINPUTW* lplpDirectInput,
                      LPUNKNOWN       punkOuter )
 {
-  //if (SK_GetDLLRole () == DLL_ROLE::DInput7)
-  {
-    SK_BootDI7      ();
-    WaitForInit_DI7 ();
-  }
+           SK_BootDI7 ();
+      WaitForInit_DI7 ();
 
   dll_log->Log ( L"[ DInput 7 ] [!] %s (%08" _L(PRIxPTR) L"h, %lu, {...}, "
                       L"lplpDirectInput=%08" _L(PRIxPTR) L"h, %08" _L(PRIxPTR)
@@ -459,12 +452,8 @@ CoCreateInstance_DI7 (
   _Out_ LPVOID   *ppv,
   _In_  LPVOID    pCallerAddr )
 {
-  SK_BootDI7      ();
-
-  //if (SK_GetDLLRole () == DLL_ROLE::DInput7)
-  {
-    WaitForInit_DI7 ();
-  }
+           SK_BootDI7 ();
+      WaitForInit_DI7 ();
 
   dll_log->Log ( L"[ DInput 7 ] [!] %s (%08" _L(PRIxPTR) L"h, %lu, {...}, "
                                L"ppvOut=%08" _L(PRIxPTR) L"h, %08" _L(PRIxPTR) L"h) - "
@@ -537,12 +526,8 @@ CoCreateInstanceEx_DI7 (
   _Inout_ MULTI_QI     *pResults,
   _In_    LPVOID        pCallerAddr )
 {
-  SK_BootDI7      ();
-
-  //if (SK_GetDLLRole () == DLL_ROLE::DInput7)
-  {
-    WaitForInit_DI7 ();
-  }
+           SK_BootDI7 ();
+      WaitForInit_DI7 ();
 
   dll_log->Log ( L"[ DInput 7 ] [!] %s (%08" _L(PRIxPTR) L"h, %lu, {...}, "
                                L"ppvOut=%08" _L(PRIxPTR) L"h) - "
@@ -626,9 +611,9 @@ di7_init_callback (finish_pfn finish)
 {
   if (! SK_IsHostAppSKIM ())
   {
-    SK_HookDI7 (nullptr);
+             SK_HookDI7 (nullptr);
 
-    WaitForInit_DI7 ();
+        WaitForInit_DI7 ();
   }
 
   finish ();
@@ -840,7 +825,14 @@ IDirectInputDevice7_GetDeviceState_Detour ( LPDIRECTINPUTDEVICE7       This,
       SK_DI7_READ (sk_input_dev_type::Keyboard)
 
       if (SK_ImGui_WantKeyboardCapture ())
+      {
         memset (lpvData, 0, cbData);
+
+        SK_DI7_HIDE (sk_input_dev_type::Keyboard)
+      }
+
+      else
+        SK_DI7_VIEW (sk_input_dev_type::Keyboard)
     }
 
     else if ( cbData == sizeof (DIMOUSESTATE2) ||
@@ -855,6 +847,8 @@ IDirectInputDevice7_GetDeviceState_Detour ( LPDIRECTINPUTDEVICE7       This,
 
       if (SK_ImGui_WantMouseCapture ())
       {
+        SK_DI7_HIDE (sk_input_dev_type::Mouse)
+
         switch (cbData)
         {
           case sizeof (DIMOUSESTATE2):
@@ -871,6 +865,11 @@ IDirectInputDevice7_GetDeviceState_Detour ( LPDIRECTINPUTDEVICE7       This,
             memset (static_cast <DIMOUSESTATE *> (lpvData)->rgbButtons, 0, 4);
             break;
         }
+      }
+
+      else
+      {
+        SK_DI7_VIEW (sk_input_dev_type::Mouse)
       }
     }
   }

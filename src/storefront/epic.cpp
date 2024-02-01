@@ -1195,11 +1195,11 @@ SK::EOS::AppName (void)
 {
   static std::string name = "";
 
-  if (                                                          name.empty () &&
-      app_cache_mgr->getAppNameFromPath (SK_GetFullyQualifiedApp ()).empty ())
+  if (                                                          name.empty ()/*&&
+      app_cache_mgr->getAppNameFromPath (SK_GetFullyQualifiedApp ()).empty () */)
   {
     std::filesystem::path path =
-      std::move (std::wstring (SK_GetFullyQualifiedApp ()));
+      std::filesystem::path (SK_GetFullyQualifiedApp ()).lexically_normal ();
 
     char szDisplayName [65] = { };
     char szEpicApp     [65] = { };
@@ -1238,9 +1238,10 @@ SK::EOS::AppName (void)
                                mancpn.is_open ())
               {
                 bool executable = false;
+                bool skip       = false;
 
                 char                     szLine [512] = { };
-                while (! mancpn.getline (szLine, 511).eof ())
+                while (! mancpn.getline (szLine, 511).eof () && skip == false)
                 {
                   if (StrStrIA (szLine, "\"DisplayName\"") != nullptr)
                   {
@@ -1255,7 +1256,18 @@ SK::EOS::AppName (void)
                     const char      *substr = StrStrIA (szLine, ":");
                     strncpy_s (szEpicApp, 64, StrStrIA (substr, "\"") + 1, _TRUNCATE);
                      *strrchr (szEpicApp, '"') = '\0';
-                    continue;
+
+                    if (! PathFileExistsW (
+                            SK_FormatStringW ( LR"(%ws\Profiles\AppCache\#EpicApps\%hs\manifest.json)",
+                                               SK_GetInstallPath (), szEpicApp ).c_str ()
+                       )                  )
+                    {
+                      executable     = false;
+                      *szEpicApp     = '\0';
+                      *szDisplayName = '\0';
+                      skip           = true;
+                      continue;
+                    }
                   }
 
                   else if (StrStrIA (szLine, "\"LaunchExecutable\"") != nullptr)
@@ -1278,6 +1290,9 @@ SK::EOS::AppName (void)
                   }
                 }
 
+                if (skip)
+                  continue;
+
                 path = L"/";
                 break;
               }
@@ -1289,7 +1304,7 @@ SK::EOS::AppName (void)
         }
 
         path =
-          path.parent_path ();
+          path.parent_path ().lexically_normal ();
       }
 
       app_cache_mgr->saveAppCache       ();

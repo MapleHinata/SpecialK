@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of Special K.
  *
  * Special K is free software : you can redistribute it
@@ -27,6 +27,7 @@
 #define __SK_SUBSYSTEM__ L"HIDHotplug"
 
 #include <SpecialK/input/xinput_hotplug.h>
+#include <hidclass.h>
 
 
 struct {
@@ -187,15 +188,22 @@ SK_XInput_NotifyDeviceArrival (void)
                     DEV_BROADCAST_DEVICEINTERFACE_W *pDev =
                       (DEV_BROADCAST_DEVICEINTERFACE_W *)pDevHdr;
 
-                    static constexpr GUID GUID_DEVINTERFACE_HID =
-                      { 0x4D1E55B2L, 0xF16F, 0x11CF, { 0x88, 0xCB, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30 } };
-
-                    if (IsEqualGUID (pDev->dbcc_classguid, GUID_DEVINTERFACE_HID))
+                    if (IsEqualGUID (pDev->dbcc_classguid, GUID_DEVINTERFACE_HID) ||
+                        IsEqualGUID (pDev->dbcc_classguid, GUID_XUSB_INTERFACE_CLASS))
                     {
                       SK_LOG0 ( ( L" Device %s:\t%s",  arrival ? L"Arrival"
                                                                : L"Removal",
                                                        pDev->dbcc_name ),
                                   __SK_SUBSYSTEM__ );
+
+                      bool playstation = false;
+                      bool xinput      = IsEqualGUID (pDev->dbcc_classguid, GUID_XUSB_INTERFACE_CLASS);
+
+                      wchar_t    wszFileName [MAX_PATH];
+                      wcsncpy_s (wszFileName, MAX_PATH, pDev->dbcc_name, _TRUNCATE);
+
+                      playstation |= wcsstr (wszFileName, L"VID_054C") != nullptr;
+                      xinput      |= wcsstr (wszFileName, L"IG_")      != nullptr;
 
                       if (arrival)
                       {
@@ -203,9 +211,9 @@ SK_XInput_NotifyDeviceArrival (void)
                           SetEvent (event);
 
                         // XInput devices contain IG_...
-                        if (  wcsstr (pDev->dbcc_name, L"IG_")     != nullptr &&
-                              wcsstr (pDev->dbcc_name, LR"(\kbd)") == nullptr )
-                              // Ignore XInputGetKeystroke
+                        if ( xinput &&
+                             wcsstr (pDev->dbcc_name, LR"(\kbd)") == nullptr )
+                             // Ignore XInputGetKeystroke
                         {
                           XINPUT_CAPABILITIES caps = { };
 
@@ -224,6 +232,139 @@ SK_XInput_NotifyDeviceArrival (void)
                             }
                           }
                         }
+
+                        else if (playstation)
+                        {
+                          bool has_existing = false;
+
+                          for ( auto& controller : SK_HID_PlayStationControllers )
+                          {
+                            if (! _wcsicmp (controller.wszDevicePath, wszFileName))
+                            {
+                              // We missed a device removal event if this is true
+                              SK_ReleaseAssert (controller.bConnected == false);
+
+                              controller.hDeviceFile =
+                                SK_CreateFile2 ( wszFileName, FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+                                                              FILE_SHARE_READ   | FILE_SHARE_WRITE,
+                                                                OPEN_EXISTING, nullptr );
+
+                              if (controller.hDeviceFile != INVALID_HANDLE_VALUE)
+                              {
+                                if (SK_HidD_GetPreparsedData (controller.hDeviceFile, &controller.pPreparsedData))
+                                {
+                                  controller.bConnected = true;
+
+                                  //SK_ImGui_Warning (L"PlayStation Controller Reconnected");
+
+                                  has_existing = true;
+                                }
+                              }
+                              break;
+                            }
+                          }
+
+                          if (! has_existing)
+                          {
+                            SK_HID_PlayStationDevice controller;
+
+                            wcsncpy_s (controller.wszDevicePath, MAX_PATH,
+                                                  wszFileName,   _TRUNCATE);
+
+                            controller.hDeviceFile =
+                              SK_CreateFile2 ( wszFileName, FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+                                                            FILE_SHARE_READ   | FILE_SHARE_WRITE,
+                                                              OPEN_EXISTING, nullptr );
+
+                            if (controller.hDeviceFile != nullptr)
+                            {
+                              controller.bConnected = true;
+                              controller.bDualSense =
+                                StrStrIW (wszFileName, L"PID_0DF2") != nullptr ||
+                                StrStrIW (wszFileName, L"PID_0CE6") != nullptr;
+
+                              std::vector <HIDP_VALUE_CAPS> value_caps;
+
+                              if (SK_HidD_GetPreparsedData (controller.hDeviceFile, &controller.pPreparsedData))
+                              {
+                                HIDP_CAPS                                      caps = { };
+                                  SK_HidP_GetCaps (controller.pPreparsedData, &caps);
+
+                                controller.input_report.resize (caps.InputReportByteLength);
+
+                                std::vector <HIDP_BUTTON_CAPS>
+                                  buttonCapsArray;
+                                  buttonCapsArray.resize (caps.NumberInputButtonCaps);
+
+                                USHORT num_caps =
+                                  caps.NumberInputButtonCaps;
+
+                                if ( HIDP_STATUS_SUCCESS ==
+                                  SK_HidP_GetButtonCaps ( HidP_Input,
+                                                            buttonCapsArray.data (), &num_caps,
+                                                              controller.pPreparsedData ) )
+                                {
+                                  for (UINT i = 0 ; i < num_caps ; ++i)
+                                  {
+                                    // Face Buttons
+                                    if (buttonCapsArray [i].IsRange)
+                                    {
+                                      controller.button_report_id =
+                                        buttonCapsArray [i].ReportID;
+                                      controller.button_usage_min =
+                                        buttonCapsArray [i].Range.UsageMin;
+                                      controller.button_usage_max =
+                                        buttonCapsArray [i].Range.UsageMax;
+
+                                      controller.buttons.resize (
+                                        static_cast <size_t> (
+                                          controller.button_usage_max -
+                                          controller.button_usage_min + 1
+                                        )
+                                      );
+                                    }
+
+                                    // D-Pad
+                                    else
+                                    {
+                                      // No idea what a third set of buttons would be...
+                                      SK_ReleaseAssert (num_caps <= 2);
+
+                                      controller.dpad_report_id =
+                                        buttonCapsArray [i].ReportID;
+                                      controller.dpad.Usage =
+                                        buttonCapsArray [i].NotRange.Usage;
+                                      controller.dpad.Usage =
+                                        buttonCapsArray [i].UsagePage;
+                                    }
+                                  }
+
+                                  // We need a contiguous array to read-back the set buttons,
+                                  //   rather than allocating it dynamically, do it once and reuse.
+                                  controller.button_usages.resize (controller.buttons.size ());
+
+                                  USAGE idx = 0;
+
+                                  for ( auto& button : controller.buttons )
+                                  {
+                                    button.UsagePage = buttonCapsArray [0].UsagePage;
+                                    button.Usage     = controller.button_usage_min + idx++;
+                                    button.state     = false;
+                                  }
+                                }
+                              }
+
+                              controller.bConnected = true;
+                              controller.bDualSense =
+                                StrStrIW (wszFileName, L"PID_0DF2") != nullptr ||
+                                StrStrIW (wszFileName, L"PID_0CE6") != nullptr;
+  
+                              SK_HID_PlayStationControllers.push_back (controller);
+
+                              //SK_ImGui_Warning (L"PlayStation Controller Connected");
+                            }
+                          }
+                        }
                       }
 
                       else
@@ -231,15 +372,38 @@ SK_XInput_NotifyDeviceArrival (void)
                         for (  auto event : SK_HID_DeviceRemovalEvents  )
                           SetEvent (event);
 
-                        if (  wcsstr (pDev->dbcc_name, L"IG_")     != nullptr &&
-                              wcsstr (pDev->dbcc_name, LR"(\kbd)") == nullptr )
-                              // Ignore XInputGetKeystroke
+                        if ( xinput &&
+                             wcsstr (pDev->dbcc_name, LR"(\kbd)") == nullptr )
+                             // Ignore XInputGetKeystroke
                         {
                           // We really have no idea what controller this is, so refresh them all
                           SetEvent (SK_XInputHot_NotifyEvent);
 
                           if ((intptr_t)SK_XInputCold_DecommisionEvent > 0)
                               SetEvent (SK_XInputCold_DecommisionEvent);
+                        }
+
+                        else if (playstation)
+                        {
+                          for ( auto& controller : SK_HID_PlayStationControllers )
+                          {
+                            if (! _wcsicmp (controller.wszDevicePath, wszFileName))
+                            {
+                              controller.bConnected = false;
+
+                              if (                          controller.hDeviceFile != nullptr)
+                                CloseHandle (std::exchange (controller.hDeviceFile,   nullptr));
+
+                              if (controller.pPreparsedData != nullptr)
+                                  SK_HidD_FreePreparsedData (
+                                    std::exchange (controller.pPreparsedData, nullptr)
+                                  );
+
+                              //SK_ImGui_Warning (L"PlayStation Controller Disconnected");
+
+                              break;
+                            }
+                          }
                         }
                       }
                     }
@@ -279,9 +443,6 @@ SK_XInput_NotifyDeviceArrival (void)
           // It's technically unnecessary to register this, but not a bad idea
           HDEVNOTIFY hDevNotify =
             SK_RegisterDeviceNotification (hWndDeviceListener);
-
-          static const GUID GUID_DEVINTERFACE_HID =
-            { 0x4D1E55B2L, 0xF16F, 0x11CF, { 0x88, 0xCB, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30 } };
 
           do
           {
@@ -669,9 +830,6 @@ SK_Win32_NotifyDeviceChange (void)
 {
 #define IDT_SDL_DEVICE_CHANGE_TIMER_1 1200
 #define IDT_SDL_DEVICE_CHANGE_TIMER_2 1201
-
-  static constexpr GUID GUID_XUSB_INTERFACE_CLASS =
-    { 0xEC87F1E3L, 0xC13B, 0x4100, { 0xB5, 0xF7, 0x8B, 0x84, 0xD5, 0x42, 0x60, 0xCB } };
 
   static DEV_BROADCAST_DEVICEINTERFACE_W     dbcc_xbox = { };
          dbcc_xbox.dbcc_size       = sizeof (dbcc_xbox);

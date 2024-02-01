@@ -3,6 +3,10 @@
 #include <mmsystem.h>
 #include <Windows.h>
 
+#include <hidclass.h>
+#include <SetupAPI.h>
+#include <Cfgmgr32.h>
+
 volatile LONG
   __SK_KeyMessageCount = 0;
 
@@ -207,15 +211,19 @@ SK_ImGui_LoadFonts (void)
 #include <SpecialK/hooks.h>
 
 
+extern bool SK_Input_DetermineMouseIdleState (MSG * lpMsg);
+extern bool SK_Window_IsCursorActive         (void);
+extern bool SK_WantBackgroundRender          (void);
+
 extern float analog_sensitivity;
 
 #include <set>
 #include <SpecialK/log.h>
 
-extern bool SK_WantBackgroundRender (void);
-
-#define SK_RAWINPUT_READ(type)  SK_RawInput_Backend->markRead  (type);
-#define SK_RAWINPUT_WRITE(type) SK_RawInput_Backend->markWrite (type);
+#define SK_RAWINPUT_READ(type)  SK_RawInput_Backend->markRead   (type);
+#define SK_RAWINPUT_WRITE(type) SK_RawInput_Backend->markWrite  (type);
+#define SK_RAWINPUT_VIEW(type)  SK_RawInput_Backend->markViewed (type);
+#define SK_RAWINPUT_HIDE(type)  SK_RawInput_Backend->markHidden (type);
 
 SK_LazyGlobal <SK_Thread_HybridSpinlock> raw_input_lock;
 
@@ -396,13 +404,15 @@ SK_ImGui_ProcessRawInput ( _In_      HRAWINPUT hRawInput,
 
             mouse = true;
 
-            if ( ((! self) && (! already_processed))
-                           && uiCommand == RID_INPUT &&
-                  (! filter) )
+            if ( (! already_processed)
+                           && uiCommand == RID_INPUT )
             {
-              SK_RAWINPUT_READ (sk_input_dev_type::Mouse)
-
-              SK_RawInput_Backend->viewed.mouse = SK_QueryPerf ().QuadPart;
+              if (! filter)
+              {
+                SK_RAWINPUT_READ (sk_input_dev_type::Mouse)
+                SK_RAWINPUT_VIEW (sk_input_dev_type::Mouse)
+              }
+              else SK_RAWINPUT_HIDE (sk_input_dev_type::Mouse)
             }
           } break;
 
@@ -465,13 +475,15 @@ SK_ImGui_ProcessRawInput ( _In_      HRAWINPUT hRawInput,
               filter = true;
 
 
-            if ( ((! self) && (! already_processed))
-                           && uiCommand == RID_INPUT
-                           && (! filter) )
+            if ( (! already_processed)
+                           && uiCommand == RID_INPUT )
             {
-              SK_RAWINPUT_READ (sk_input_dev_type::Keyboard)
-
-              SK_RawInput_Backend->viewed.keyboard = SK_QueryPerf ().QuadPart;
+              if (! filter)
+              {
+                SK_RAWINPUT_READ (sk_input_dev_type::Keyboard)
+                SK_RAWINPUT_VIEW (sk_input_dev_type::Keyboard)
+              }
+              else SK_RAWINPUT_HIDE (sk_input_dev_type::Keyboard)
             }
 
         //// Leads to double-input processing, left here in case Legacy Messages are disabled and this is needed
@@ -507,13 +519,15 @@ SK_ImGui_ProcessRawInput ( _In_      HRAWINPUT hRawInput,
             if (SK_ImGui_WantGamepadCapture ())
               filter = true;
 
-            if ( ((! self) && (! already_processed))
-                           && uiCommand == RID_INPUT
-                           && (! filter) )
+            if ( (! already_processed)
+                           && uiCommand == RID_INPUT )
             {
-              SK_RAWINPUT_READ (sk_input_dev_type::Gamepad)
-
-              SK_RawInput_Backend->viewed.gamepad = SK_QueryPerf ().QuadPart;
+              if (! filter)
+              {
+                SK_RAWINPUT_READ (sk_input_dev_type::Gamepad)
+                SK_RAWINPUT_VIEW (sk_input_dev_type::Gamepad)
+              }
+              else SK_RAWINPUT_HIDE (sk_input_dev_type::Gamepad)
             }
           } break;
         }
@@ -521,11 +535,11 @@ SK_ImGui_ProcessRawInput ( _In_      HRAWINPUT hRawInput,
         return filter;
       };
 
-  filter = (! self) &&
-    FilterRawInput (uiCommand, (RAWINPUT *)pData, mouse, keyboard);
+  filter =
+    FilterRawInput (uiCommand, (RAWINPUT *)pData, mouse, keyboard) && (! self);
 
 
-  if (uiCommand == RID_INPUT /*&& SK_ImGui_Visible*/)
+  if (uiCommand == RID_INPUT)
   {
     switch (((RAWINPUT *)pData)->header.dwType)
     {
@@ -1233,9 +1247,6 @@ MessageProc ( const HWND&   hWnd,
   return false;
 };
 
-extern bool SK_Input_DetermineMouseIdleState (MSG * lpMsg);
-extern bool SK_Window_IsCursorActive         (void);
-
 LRESULT
 WINAPI
 ImGui_WndProcHandler ( HWND   hWnd,    UINT  msg,
@@ -1276,16 +1287,16 @@ ImGui_WndProcHandler ( HWND   hWnd,    UINT  msg,
         MAKEPOINTS (messagePos);
 
       if ( ( hWnd == game_window.hWnd ||
-             hWnd == game_window.child ) && HIWORD (lParam) == WM_MOUSEMOVE && ( mousePos.x != lastMouse.x ||
-                                                                                 mousePos.y != lastMouse.y ) )
+             hWnd == game_window.child ) && HIWORD (lParam) != WM_NULL && ( mousePos.x != lastMouse.x ||
+                                                                            mousePos.y != lastMouse.y ) )
       {
         static LONG        lastTime = 0;
         if (std::exchange (lastTime, messageTime) != messageTime)
         {
           static HCURSOR hLastClassCursor = (HCURSOR)(-1);
 
-          if ( SK_ImGui_WantMouseCapture () &&
-                  ImGui::IsWindowHovered (ImGuiHoveredFlags_AnyWindow) )
+          if ( SK_ImGui_WantMouseCapture  () &&
+               SK_ImGui_IsAnythingHovered () )
           {
             if (hLastClassCursor == (HCURSOR)(-1))
                 hLastClassCursor  = (HCURSOR)GetClassLongPtrW (game_window.hWnd, GCLP_HCURSOR);
@@ -1483,21 +1494,28 @@ ImGui_WndProcHandler ( HWND   hWnd,    UINT  msg,
           DEV_BROADCAST_DEVICEINTERFACE_A *pDevA =
             (DEV_BROADCAST_DEVICEINTERFACE_A *)pDevHdr;
 
-          static constexpr GUID GUID_DEVINTERFACE_HID =
-            { 0x4D1E55B2L, 0xF16F, 0x11CF, { 0x88, 0xCB, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30 } };
-
-          static constexpr GUID GUID_XUSB_INTERFACE_CLASS =
-            { 0xEC87F1E3L, 0xC13B, 0x4100, { 0xB5, 0xF7, 0x8B, 0x84, 0xD5, 0x42, 0x60, 0xCB } };
-
           if (IsEqualGUID (pDevW->dbcc_classguid, GUID_DEVINTERFACE_HID) ||
               IsEqualGUID (pDevW->dbcc_classguid, GUID_XUSB_INTERFACE_CLASS))
           {
             bool xinput = IsEqualGUID (pDevW->dbcc_classguid, GUID_XUSB_INTERFACE_CLASS);
 
-            if (     pDevW->dbcc_size == sizeof (DEV_BROADCAST_DEVICEINTERFACE_W))
-              xinput |= wcsstr (pDevW->dbcc_name, L"IG_") != nullptr;
-            else if (pDevA->dbcc_size == sizeof (DEV_BROADCAST_DEVICEINTERFACE_A))
-              xinput |= strstr (pDevA->dbcc_name,  "IG_") != nullptr;
+            const bool ansi = pDevA->dbcc_size == sizeof (DEV_BROADCAST_DEVICEINTERFACE_A);
+            const bool wide = pDevW->dbcc_size == sizeof (DEV_BROADCAST_DEVICEINTERFACE_W);
+
+            wchar_t wszFileName [MAX_PATH];
+
+            if (ansi)
+            {
+              wcsncpy_s (                         wszFileName, MAX_PATH,
+                SK_UTF8ToWideChar (pDevA->dbcc_name).c_str (), _TRUNCATE );
+            }
+
+            else if (wide)
+            {
+              wcsncpy_s (wszFileName, MAX_PATH, pDevW->dbcc_name, _TRUNCATE);
+            }
+
+            xinput |= wcsstr (wszFileName, L"IG_") != nullptr;
 
             if (xinput)
             {
@@ -1631,10 +1649,7 @@ SK_ImGui_FilterXInput (
     if (pState->dwPacketNumber < 1)
         pState->dwPacketNumber = 1;
 
-    // Disabled device slots (the other condition in this branch)
-    //   should still be counted as polled slots
-  //if (disable)
-      return true;
+    return true;
   }
 
   return false;
@@ -1681,13 +1696,42 @@ struct {
 
 
 bool
-WINAPI
-SK_XInput_PulseController ( INT   iJoyID,
-                            float fStrengthLeft,
-                            float fStrengthRight );
-extern void
-WINAPI
-SK_XInput_ZeroHaptics ( INT iJoyID );
+SK_ImGui_HasPlayStationController (void)
+{
+  for ( const auto& controller : SK_HID_PlayStationControllers )
+  {
+    if (controller.bConnected)
+      return true;
+  }
+
+  return false;
+}
+
+bool
+SK_ImGui_HasDualSenseController (void)
+{
+  for ( const auto& controller : SK_HID_PlayStationControllers )
+  {
+    if ( controller.bConnected &&
+         controller.bDualSense )
+      return true;
+  }
+
+  return false;
+}
+
+bool
+SK_ImGui_HasDualSenseEdgeController (void)
+{
+  for ( const auto& controller : SK_HID_PlayStationControllers )
+  {
+    if ( controller.bConnected &&
+         controller.bDualSenseEdge )
+      return true;
+  }
+
+  return false;
+}
 
 
 #include <SpecialK/steam_api.h>
@@ -1811,6 +1855,8 @@ SK_XInput_ValidateStatePointer (XINPUT_STATE *pState)
   return true;
 }
 
+#include <SpecialK/sound.h>
+
 bool
 SK_ImGui_PollGamepad_EndFrame (XINPUT_STATE* pState)
 {
@@ -1865,6 +1911,104 @@ SK_ImGui_PollGamepad_EndFrame (XINPUT_STATE* pState)
 
   if (bUseGamepad)
   {
+    SK_RunOnce (SK_HID_SetupPlayStationControllers ());
+
+    for ( auto& ps_controller : SK_HID_PlayStationControllers )
+    {
+      if (ps_controller.bConnected)
+      {
+        if (ps_controller.pPreparsedData == nullptr)
+          continue;
+
+        ZeroMemory ( ps_controller.input_report.data (),
+                     ps_controller.input_report.size () );
+
+        ps_controller.input_report [0] = ps_controller.button_report_id;
+
+#if 1
+        DWORD dwNumBytesRead = 0;
+
+        // This is non-blocking if there's no new data... this is the one we want.
+        if (! SK_ReadFile (
+          ps_controller.hDeviceFile, ps_controller.input_report.data (),
+                static_cast <DWORD> (ps_controller.input_report.size ()), &dwNumBytesRead, nullptr )
+           )
+#else
+        if (! SK_HidD_GetInputReport (
+          ps_controller.hDeviceFile, ps_controller.input_report.data (),
+                static_cast <ULONG> (ps_controller.input_report.size ())
+              )
+           )
+#endif
+        {
+          if (config.system.log_level > 0)
+          {
+            SK_RunOnce (
+              SK_ImGui_Warning (L"Failed to poll PlayStation Controller...")
+            );
+          }
+
+          SK_LOGs0 (L"InputBkEnd", L"HidD_GetInputReport (...) failed, Error=%d", GetLastError ());
+        }
+
+        ULONG num_usages =
+          static_cast <ULONG> (ps_controller.button_usages.size ());
+
+        if ( HIDP_STATUS_SUCCESS ==
+          SK_HidP_GetUsages ( HidP_Input, ps_controller.buttons [0].UsagePage, 0,
+                                          ps_controller.button_usages.data (),
+                                                          &num_usages,
+                                          ps_controller.pPreparsedData,
+                                   (PCHAR)ps_controller.input_report.data  (),
+                     static_cast <ULONG> (ps_controller.input_report.size  ()) )
+           )
+        {
+          for ( auto& button : ps_controller.buttons )
+          {
+            button.last_state =
+              std::exchange (button.state, false);
+          }
+
+          for ( UINT i = 0; i < num_usages; ++i )
+          {
+            ps_controller.buttons [
+              ps_controller.button_usages [i] -
+              ps_controller.buttons       [0].Usage
+            ].state = true;
+          }
+        }
+
+        if ( config.input.gamepad.scepad.enhanced_ps_button &&
+                        ps_controller.buttons.size () >= 13 &&
+                  (config.input.gamepad.xinput.ui_slot >= 0 && 
+                   config.input.gamepad.xinput.ui_slot <  4) )
+        {
+          if (ps_controller.buttons [12].state && (! ps_controller.buttons [12].last_state))
+          {
+            if (SK_ImGui_Active ())
+            {
+              bToggleVis |= true;
+              bToggleNav |= true;
+            }
+
+            else
+            {
+              bToggleNav |= (! nav_usable);
+              bToggleVis |= true;
+            }
+          }
+        }
+
+        if (ps_controller.bDualSense && config.input.gamepad.scepad.mute_applies_to_game)
+        {
+          if (ps_controller.buttons [14].state && (! ps_controller.buttons [14].last_state))
+          {
+            SK_SetGameMute (! SK_IsGameMuted ());
+          }
+        }
+      }
+    }
+
     auto& state =
         *pState;
 
@@ -2926,7 +3070,8 @@ SK_ImGui_User_NewFrame (void)
   // Mouse input should be swallowed because it interacts with ImGui;
   //   regular mouse capture includes swallowing input for "Disabled to Game".
   bool bWantMouseCaptureForUI =
-    SK_ImGui_WantMouseCaptureEx (0x0);
+    SK_ImGui_WantMouseCaptureEx (0x0) && (SK_ImGui_IsAnythingHovered () || ImGui::IsPopupOpen (nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel));
+    //SK_ImGui_WantMouseCaptureEx (0x0);
 
   if ( abs (last_x - SK_ImGui_Cursor.pos.x) > 3 ||
        abs (last_y - SK_ImGui_Cursor.pos.y) > 3 ||
@@ -2938,13 +3083,13 @@ SK_ImGui_User_NewFrame (void)
   }
 
 
-  if ((bWantMouseCaptureForUI || SK_ImGui_Active ()) && SK_ImGui_Cursor.last_move > SK::ControlPanel::current_time - 500)
+  if (bWantMouseCaptureForUI || (SK_ImGui_Active () && SK_ImGui_Cursor.last_move > SK::ControlPanel::current_time - 500))
     SK_ImGui_Cursor.idle = false;
 
   else
-    SK_ImGui_Cursor.idle = ( (! SK_ImGui_WantMouseCapture ()) || config.input.mouse.disabled_to_game == SK_InputEnablement::Disabled );
-                                                              // Disabled to game is a form of capture,
-                                                              //   but it is exempt from idle cursor logic
+    SK_ImGui_Cursor.idle = ( (! bWantMouseCaptureForUI) || config.input.mouse.disabled_to_game == SK_InputEnablement::Disabled );
+                                                        // Disabled to game is a form of capture,
+                                                        //   but it is exempt from idle cursor logic
 
   const bool bManageCursor =
     (config.input.cursor.manage || SK_ImGui_Cursor.force != sk_cursor_state::None);
@@ -2979,7 +3124,7 @@ SK_ImGui_User_NewFrame (void)
 
   if (! SK_ImGui_Cursor.idle)
   {
-    if (SK_ImGui_WantMouseCapture ())
+    if (SK_ImGui_WantMouseCapture () && SK_ImGui_IsAnythingHovered ())
     {
       extern HCURSOR ImGui_DesiredCursor (void);
       SK_SetCursor  (ImGui_DesiredCursor ());

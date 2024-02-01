@@ -116,6 +116,19 @@ static DWORD last_winhook    = 0;
 static DWORD last_winmm      = 0;
 static DWORD last_win32      = 0;
 
+static DWORD hide_xinput     = 0;
+static DWORD hide_scepad     = 0;
+static DWORD hide_wgi        = 0;
+static DWORD hide_hid        = 0;
+static DWORD hide_di7        = 0;
+static DWORD hide_di8        = 0;
+static DWORD hide_steam      = 0;
+static DWORD hide_messagebus = 0;
+static DWORD hide_rawinput   = 0;
+static DWORD hide_winhook    = 0;
+static DWORD hide_winmm      = 0;
+static DWORD hide_win32      = 0;
+
 bool
 SK::ControlPanel::Input::Draw (void)
 {
@@ -196,49 +209,48 @@ SK::ControlPanel::Input::Draw (void)
     win32.cursorpos         = SK_Win32_Backend->reads      [0];
 
 
-    if (SK_XInput_Backend->nextFrame ())
-      last_xinput     = current_time;
-
-    if (SK_ScePad_Backend->nextFrame ())
-      last_scepad     = current_time;
-
-    if (SK_WGI_Backend->nextFrame ())
-      last_wgi        = current_time;
-
-    if (SK_MessageBus_Backend->nextFrame ())
-      last_messagebus = current_time;
-
-    if (SK_Steam_Backend->nextFrame ())
-      last_steam      = current_time;
-
-    if (SK_HID_Backend->nextFrame ())
-      last_hid        = current_time;
-
-    if (SK_DI7_Backend->nextFrame ())
-      last_di7        = current_time;
-
-    if (SK_DI8_Backend->nextFrame ())
-      last_di8        = current_time;
-
-    if (SK_RawInput_Backend->nextFrame ())
-      last_rawinput   = current_time;
-
-    if (SK_WinHook_Backend->nextFrame ())
-      last_winhook    = current_time;
-
-    if (SK_Win32_Backend->nextFrameWin32 ())
-      last_win32      = current_time;
-
-    if (SK_WinMM_Backend->nextFrame ())
-      last_winmm      = current_time;
+    // Implictly hide slots before tallying read/write activity, these slots
+    //   read-back neutral data and are effectively hidden
+    if (config.input.gamepad.xinput.disable [0]) SK_XInput_Backend->last_frame.hidden [0] = 1;
+    if (config.input.gamepad.xinput.disable [1]) SK_XInput_Backend->last_frame.hidden [1] = 1;
+    if (config.input.gamepad.xinput.disable [2]) SK_XInput_Backend->last_frame.hidden [2] = 1;
+    if (config.input.gamepad.xinput.disable [3]) SK_XInput_Backend->last_frame.hidden [3] = 1;
 
 
-    if (last_steam > current_time - 500UL)
+#define UPDATE_BACKEND_TIMES(backend,name,func)                                         \
+  if (SK_##backend##_Backend->##func## ())                                              \
+  {                                                                                     \
+    last_##name = SK_##backend##_Backend->active.hidden ? last_##name   : current_time; \
+    hide_##name = SK_##backend##_Backend->active.hidden ? current_time  : hide_##name;  \
+  }
+
+    UPDATE_BACKEND_TIMES (XInput,         xinput, nextFrame);
+    UPDATE_BACKEND_TIMES (ScePad,         scepad, nextFrame);
+    UPDATE_BACKEND_TIMES (WGI,               wgi, nextFrame);
+    UPDATE_BACKEND_TIMES (MessageBus, messagebus, nextFrame);
+    UPDATE_BACKEND_TIMES (Steam,           steam, nextFrame);
+    UPDATE_BACKEND_TIMES (HID,               hid, nextFrame);
+    UPDATE_BACKEND_TIMES (DI7,               di7, nextFrame);
+    UPDATE_BACKEND_TIMES (DI8,               di8, nextFrame);
+    UPDATE_BACKEND_TIMES (RawInput,     rawinput, nextFrame);
+    UPDATE_BACKEND_TIMES (WinHook,       winhook, nextFrame);
+    UPDATE_BACKEND_TIMES (Win32,           win32, nextFrameWin32);
+    UPDATE_BACKEND_TIMES (WinMM,           winmm, nextFrame);
+
+#define SETUP_LABEL_COLOR(name,threshold)                               \
+      const DWORD input_time = std::max (last_##name##, hide_##name##); \
+                                                                        \
+      ImGui::PushStyleColor (ImGuiCol_Text, ImColor::HSV (0.4f - (0.4f * ((float)current_time - \
+                                                                          (float)  input_time) / (threshold)), (hide_##name## >= last_##name##) ? 0.0f : 1.0f, \
+                                                                                                               (hide_##name## >= last_##name##) ? 0.6f : 0.8f).Value);
+
+    if ( last_steam > current_time - 500UL ||
+         hide_steam > current_time - 500UL )
     {
+      SETUP_LABEL_COLOR (steam, 500.0f);
+
       if (SK::SteamAPI::AppID () > 0)
       {
-        ImGui::PushStyleColor (ImGuiCol_Text, ImColor::HSV (0.4f - ( 0.4f * ( (float)current_time -
-                                                                              (float)  last_steam ) / 500.0f ), 1.0f, 0.8f).Value);
         ImGui::SameLine ( );
         ImGui::Text ("       Steam");
         ImGui::PopStyleColor ( );
@@ -282,10 +294,11 @@ SK::ControlPanel::Input::Draw (void)
       }
     }
 
-    if (last_xinput > current_time - 500UL)
+    if ( last_xinput > current_time - 500UL ||
+         hide_xinput > current_time - 500UL )
     {
-      ImGui::PushStyleColor (ImGuiCol_Text, ImColor::HSV (0.4f - (0.4f * ((float)current_time -
-                                                                          (float) last_xinput ) / 500.0f), 1.0f, 0.8f).Value);
+      SETUP_LABEL_COLOR (xinput, 500.0f);
+
       ImGui::SameLine       ();
       ImGui::Text           ("       %s", SK_XInput_GetPrimaryHookName ());
       ImGui::PopStyleColor  ();
@@ -306,9 +319,9 @@ SK::ControlPanel::Input::Draw (void)
         {
           if (xinput.reads [i] > 0)
           {
-            ImGui::TextUnformatted (
+            ImGui::TextColored ( ImVec4 (1.f, 0.f, 0.f, 1.f),
               config.input.gamepad.xinput.disable [i] ?
-                                      " [ Disabled ]" : "" );
+                                      "  Disabled" : "" );
           }
         }
         ImGui::EndGroup     ();
@@ -316,10 +329,11 @@ SK::ControlPanel::Input::Draw (void)
       }
     }
 
-    if (last_wgi > current_time - 500UL)
+    if ( last_wgi > current_time - 500UL ||
+         hide_wgi > current_time - 500UL )
     {
-      ImGui::PushStyleColor (ImGuiCol_Text, ImColor::HSV (0.4f - (0.4f * ((float)current_time -
-                                                                          (float) last_wgi ) / 500.0f), 1.0f, 0.8f).Value);
+      SETUP_LABEL_COLOR (wgi, 500.0f);
+
       ImGui::SameLine       ();
       ImGui::Text           ("       Windows.Gaming.Input");
       ImGui::PopStyleColor  ();
@@ -332,19 +346,21 @@ SK::ControlPanel::Input::Draw (void)
       }
     }
 
-    if (last_scepad > current_time - 500UL)
+    if ( last_scepad > current_time - 500UL ||
+         hide_scepad > current_time - 500UL )
     {
-      ImGui::PushStyleColor (ImGuiCol_Text, ImColor::HSV (0.4f - (0.4f * ((float)current_time -
-                                                                          (float) last_scepad ) / 500.0f), 1.0f, 0.8f).Value);
+      SETUP_LABEL_COLOR (scepad, 500.0f);
+
       ImGui::SameLine       ();
       ImGui::Text           ("       PlayStation");
       ImGui::PopStyleColor  ();
     }
 
-    if (last_hid > current_time - 500UL)
+    if ( last_hid > current_time - 500UL ||
+         hide_hid > current_time - 500UL )
     {
-      ImGui::PushStyleColor (ImGuiCol_Text, ImColor::HSV (0.4f - (0.4f * ((float)current_time -
-                                                                          (float)    last_hid ) / 500.0f), 1.0f, 0.8f).Value);
+      SETUP_LABEL_COLOR (hid, 500.0f);
+
       ImGui::SameLine       ();
       ImGui::Text           ("       HID");
       ImGui::PopStyleColor  ();
@@ -354,20 +370,21 @@ SK::ControlPanel::Input::Draw (void)
         ImGui::BeginTooltip ();
 
         if (hid.kbd_reads > 0)
-          ImGui::Text       ("Keyboard      %lu", hid.kbd_reads);
+          ImGui::Text       ("Keyboard    %lu", hid.kbd_reads);
         if (hid.mouse_reads > 0)
-          ImGui::Text         ("Mouse       %lu", hid.mouse_reads);
+          ImGui::Text       ("Mouse       %lu", hid.mouse_reads);
         if (hid.gamepad_reads > 0)
-          ImGui::Text         ("Gamepad     %lu", hid.gamepad_reads);
+          ImGui::Text       ("Gamepad     %lu", hid.gamepad_reads);
 
         ImGui::EndTooltip   ();
       }
     }
 
-    if (last_winmm > current_time - 500UL)
+    if ( last_winmm > current_time - 500UL ||
+         hide_winmm > current_time - 500UL )
     {
-      ImGui::PushStyleColor (ImGuiCol_Text, ImColor::HSV (0.4f - (0.4f * ((float)current_time -
-                                                                          (float) last_winmm ) / 500.0f), 1.0f, 0.8f).Value);
+      SETUP_LABEL_COLOR (winmm, 500.0f);
+
       ImGui::SameLine       ();
       ImGui::Text           ("    WinMM Joystick");
       ImGui::PopStyleColor  ();
@@ -381,10 +398,13 @@ SK::ControlPanel::Input::Draw (void)
       }
     }
 
-    if (last_messagebus > current_time - 500UL)
+    // MessageBus is technically third-party software polling input from within
+    //  the game's process... reporting its activity is not useful to end-users
+#if 0
+    if (last_messagebus > current_time - 500UL || hide_messagebus > current_time - 500UL)
     {
-      ImGui::PushStyleColor (ImGuiCol_Text, ImColor::HSV (0.4f - (0.4f * ((float)current_time -
-                                                                          (float) last_messagebus ) / 500.0f), 1.0f, 0.8f).Value);
+      SETUP_LABEL_COLOR (messagebus, 500.0f);
+
       ImGui::SameLine       ();
       ImGui::Text           ("       NVIDIA MessageBus");
       ImGui::PopStyleColor  ();
@@ -397,11 +417,13 @@ SK::ControlPanel::Input::Draw (void)
         ImGui::EndTooltip   ();
       }
     }
+#endif
 
-    if (last_di7 > current_time - 500UL)
+    if ( last_di7 > current_time - 500UL ||
+         hide_di7 > current_time - 500UL )
     {
-      ImGui::PushStyleColor (ImGuiCol_Text, ImColor::HSV (0.4f - (0.4f * ((float)current_time -
-                                                                          (float)    last_di7 ) / 500.0f), 1.0f, 0.8f).Value);
+      SETUP_LABEL_COLOR (di7, 500.0f);
+
       ImGui::SameLine       ();
       ImGui::Text           ("       DirectInput 7");
       ImGui::PopStyleColor  ();
@@ -424,10 +446,11 @@ SK::ControlPanel::Input::Draw (void)
       }
     }
 
-    if (last_di8 > current_time - 500UL)
+    if ( last_di8 > current_time - 500UL ||
+         hide_di8 > current_time - 500UL )
     {
-      ImGui::PushStyleColor (ImGuiCol_Text, ImColor::HSV (0.4f - (0.4f * ( (float)current_time -
-                                                                           (float)    last_di8 ) / 500.0f), 1.0f, 0.8f).Value);
+      SETUP_LABEL_COLOR (di8, 500.0f);
+
       ImGui::SameLine       ();
       ImGui::Text           ("       DirectInput 8");
       ImGui::PopStyleColor  ();
@@ -450,36 +473,11 @@ SK::ControlPanel::Input::Draw (void)
       }
     }
 
-    if (last_rawinput > current_time - 500UL)
+    if ( last_winhook > current_time - 10000UL ||
+         hide_winhook > current_time - 10000UL )
     {
-      ImGui::PushStyleColor (ImGuiCol_Text, ImColor::HSV (0.4f - (0.4f * ( (float)current_time -
-                                                                           (float)last_rawinput ) / 500.0f), 1.0f, 0.8f).Value);
-      ImGui::SameLine       ();
-      ImGui::Text           ("       Raw Input");
-      ImGui::PopStyleColor  ();
+      SETUP_LABEL_COLOR (winhook, 10000.0f);
 
-      if (ImGui::IsItemHovered ())
-      {
-        ImGui::BeginTooltip ();
-                                                                             
-        if (raw_input.kbd_reads > 0) {
-          ImGui::Text       ("Keyboard   %lu", raw_input.kbd_reads);
-        }
-        if (raw_input.mouse_reads > 0) {
-          ImGui::Text       ("Mouse      %lu", raw_input.mouse_reads);
-        }
-        if (raw_input.gamepad_reads > 0) {
-          ImGui::Text       ("Gamepad    %lu", raw_input.gamepad_reads);
-        }
-
-        ImGui::EndTooltip   ();
-      }
-    }
-
-    if (last_winhook > current_time - 10000UL)
-    {
-      ImGui::PushStyleColor (ImGuiCol_Text, ImColor::HSV (0.4f - ( 0.4f * ( (float)current_time -
-                                                                            (float)last_winhook ) / 10000.0f ), 1.0f, 0.8f).Value);
       ImGui::SameLine      ();
       ImGui::Text ("       Windows Hook");
       ImGui::PopStyleColor ();
@@ -495,10 +493,11 @@ SK::ControlPanel::Input::Draw (void)
       }
     }
 
-    if (last_win32 > current_time - 10000UL)
+    if ( last_win32 > current_time - 10000UL ||
+         hide_win32 > current_time - 10000UL )
     {
-      ImGui::PushStyleColor (ImGuiCol_Text, ImColor::HSV (0.4f - ( 0.4f * ( (float)current_time -
-                                                                            (float)  last_win32 ) / 10000.0f ), 1.0f, 0.8f).Value);
+      SETUP_LABEL_COLOR (win32, 10000.0f);
+
       ImGui::SameLine      ();
       ImGui::Text ("       Win32");
       ImGui::PopStyleColor ();
@@ -529,6 +528,34 @@ SK::ControlPanel::Input::Draw (void)
         if (win32.cursorpos > 0)
           ImGui::Text ("%lu", win32.cursorpos);
         ImGui::EndGroup     ();
+        ImGui::EndTooltip   ();
+      }
+    }
+
+    // Place Raw Input at the end, since it's the most likely to disappear
+    if ( last_rawinput > current_time - 500UL ||
+         hide_rawinput > current_time - 500UL )
+    {
+      SETUP_LABEL_COLOR (rawinput, 500.0f);
+
+      ImGui::SameLine       ();
+      ImGui::Text           ("       Raw Input");
+      ImGui::PopStyleColor  ();
+
+      if (ImGui::IsItemHovered ())
+      {
+        ImGui::BeginTooltip ();
+                                                                             
+        if (raw_input.kbd_reads > 0) {
+          ImGui::Text       ("Keyboard   %lu", raw_input.kbd_reads);
+        }
+        if (raw_input.mouse_reads > 0) {
+          ImGui::Text       ("Mouse      %lu", raw_input.mouse_reads);
+        }
+        if (raw_input.gamepad_reads > 0) {
+          ImGui::Text       ("Gamepad    %lu", raw_input.gamepad_reads);
+        }
+
         ImGui::EndTooltip   ();
       }
     }
@@ -763,10 +790,18 @@ SK::ControlPanel::Input::Draw (void)
 
         ImGui::NextColumn ( );
 
-        ImGui::Checkbox ("Dynamic XInput " ICON_FA_GAMEPAD " 0", &config.input.gamepad.xinput.auto_slot_assign);
+        if (config.input.gamepad.xinput.ui_slot >= 0 && config.input.gamepad.xinput.ui_slot < 4)
+        {
+          ImGui::Checkbox ("Dynamic XInput " ICON_FA_GAMEPAD " 0", &config.input.gamepad.xinput.auto_slot_assign);
 
-        if (ImGui::IsItemHovered ())
-          ImGui::SetTooltip ("Automatically reassign slot 0 in response to gamepad input");
+          if (ImGui::IsItemHovered ())
+            ImGui::SetTooltip ("Automatically reassign slot 0 in response to gamepad input");
+        }
+
+        else
+        {
+          config.input.gamepad.xinput.auto_slot_assign = false;
+        }
 
         ImGui::NextColumn ( );
         ImGui::Columns    (2);
@@ -806,6 +841,15 @@ SK::ControlPanel::Input::Draw (void)
             ImGui::PushStyleColor (ImGuiCol_FrameBgActive,  ImVec4 (1.0f, 0.1f, 0.1f, 1.0f));
             ImGui::PushStyleColor (ImGuiCol_FrameBgHovered, ImVec4 (0.9f, 0.4f, 0.4f, 1.0f));
             ImGui::PushStyleColor (ImGuiCol_FrameBg,        ImVec4 (1.0f, 0.1f, 0.1f, 1.0f));
+            ImGui::PushStyleColor (ImGuiCol_CheckMark,      ImVec4 (0.0f, 0.0f, 0.0f, 1.0f));
+          }
+
+          else if (SK_ImGui_WantGamepadCapture ())
+          {
+            ImGui::PushStyleColor (ImGuiCol_FrameBgActive,  ImVec4 (1.0f, 1.0f, 0.1f, 1.0f));
+            ImGui::PushStyleColor (ImGuiCol_FrameBgHovered, ImVec4 (0.9f, 0.9f, 0.4f, 1.0f));
+            ImGui::PushStyleColor (ImGuiCol_FrameBg,        ImVec4 (1.0f, 1.0f, 0.1f, 1.0f));
+            ImGui::PushStyleColor (ImGuiCol_CheckMark,      ImVec4 (0.0f, 0.0f, 0.0f, 1.0f));
           }
 
           if (ImGui::Checkbox (szName, &placehold_slot))
@@ -834,27 +878,66 @@ SK::ControlPanel::Input::Draw (void)
             }
           }
 
-          if (disable_slot)
+          if (disable_slot || SK_ImGui_WantGamepadCapture ())
           {
-            ImGui::PopStyleColor (3);
+            ImGui::PopStyleColor (4);
           }
 
           if (ImGui::IsItemHovered ())
           {
             const SK_XInput_PacketJournal journal =
-              SK_XInput_GetPacketJournal (dwIndex);
+                SK_XInput_GetPacketJournal (dwIndex);
 
-            ImGui::BeginTooltip( );
-            ImGui::TextColored (ImColor (255, 255, 255), "Hardware Packet Sequencing");
-            ImGui::TextColored (ImColor (160, 160, 160), "(Last: %lu | Now: %lu)",
-                                journal.sequence.last, journal.sequence.current);
-            ImGui::Separator   ( );
-            ImGui::Columns     (2, nullptr, false);
-            ImGui::TextColored (ImColor (255, 165, 0), "Virtual Packets..."); ImGui::NextColumn ();
-            ImGui::Text        ("%+07li", journal.packet_count.virt);         ImGui::NextColumn ();
-            ImGui::TextColored (ImColor (127, 255, 0), "Real Packets...");    ImGui::NextColumn ();
-            ImGui::Text        ("%+07li", journal.packet_count.real);
-            ImGui::Columns     (1);
+            ImGui::BeginTooltip  ( );
+
+            ImGui::BeginGroup    ( );
+            ImGui::TextUnformatted ("Device State: ");
+            ImGui::TextUnformatted ("Placeholding: ");
+            ImGui::EndGroup      ( );
+
+            ImGui::SameLine      ( );
+
+            ImGui::BeginGroup    ( );
+            if (config.input.gamepad.xinput.disable [dwIndex] || config.input.gamepad.xinput.blackout_api)
+              ImGui::TextColored (ImVec4 (1.0f, 0.1f, 0.1f, 1.0f), "Disabled");
+            else if (SK_ImGui_WantGamepadCapture ())
+              ImGui::TextColored (ImVec4 (1.0f, 1.0f, 0.1f, 1.0f), "Blocked");
+            else
+              ImGui::TextColored (ImVec4 (0.1f, 1.0f, 0.1f, 1.0f), "Enabled");
+
+            if (config.input.gamepad.xinput.placehold [dwIndex])
+            {
+              if (SK_XInput_Holding (dwIndex))
+                ImGui::TextColored (ImVec4 ( 0.1f,  1.0f,  0.1f, 1.0f), "Enabled and Active");
+              else
+                ImGui::TextColored (ImVec4 (0.75f, 0.75f, 0.75f, 1.0f), "Enabled");
+            }
+
+            else
+                ImGui::TextColored (ImVec4 ( 0.5f,  0.5f,  0.5f, 1.0f), "N/A");
+            ImGui::EndGroup      ( );
+            
+            ImGui::Separator     ( );
+
+            if (config.input.gamepad.xinput.placehold [dwIndex] && journal.packet_count.virt > 0)
+            {
+              ImGui::TextColored (ImColor (255, 255, 255), "Hardware Packet Sequencing");
+              ImGui::TextColored (ImColor (160, 160, 160), "(Last: %lu | Now: %lu)",
+                                  journal.sequence.last, journal.sequence.current);
+              ImGui::Separator   ( );
+              ImGui::Columns     (2, nullptr, false);
+              ImGui::TextColored (ImColor (255, 165, 0), "Virtual Packets..."); ImGui::NextColumn ();
+              ImGui::Text        ("%+07li", journal.packet_count.virt);         ImGui::NextColumn ();
+              ImGui::TextColored (ImColor (127, 255, 0), "Real Packets...");    ImGui::NextColumn ();
+              ImGui::Text        ("%+07li", journal.packet_count.real);
+              ImGui::Columns     (1);
+            }
+
+            else
+            {
+              ImGui::BulletText ("Inputs Processed:\t%d", journal.packet_count.real);
+            }
+
             ImGui::EndTooltip  ( );
           }
         };
@@ -885,23 +968,30 @@ SK::ControlPanel::Input::Draw (void)
         ImGui::Separator ( );
       }
 
-      if (config.input.gamepad.hook_scepad || last_scepad != 0)
-      {
-        if (last_scepad != 0)
-        {
-          ImGui::PushStyleColor (ImGuiCol_Header,        ImVec4 (0.90f, 0.40f, 0.40f, 0.45f));
-          ImGui::PushStyleColor (ImGuiCol_HeaderHovered, ImVec4 (0.90f, 0.45f, 0.45f, 0.80f));
-          ImGui::PushStyleColor (ImGuiCol_HeaderActive,  ImVec4 (0.87f, 0.53f, 0.53f, 0.80f));
+      const bool bHasPlayStation =
+        (last_scepad != 0 || (! SK_HID_PlayStationControllers.empty ()));
 
-          if (ImGui::CollapsingHeader ("PlayStation  (DualShock 4 / DualSense)", ImGuiTreeNodeFlags_DefaultOpen))
+      if (bHasPlayStation)
+      {
+        ImGui::PushStyleColor (ImGuiCol_Header,        ImVec4 (0.90f, 0.40f, 0.40f, 0.45f));
+        ImGui::PushStyleColor (ImGuiCol_HeaderHovered, ImVec4 (0.90f, 0.45f, 0.45f, 0.80f));
+        ImGui::PushStyleColor (ImGuiCol_HeaderActive,  ImVec4 (0.87f, 0.53f, 0.53f, 0.80f));
+
+        if (ImGui::CollapsingHeader ("PlayStation  (DualShock 4 / DualSense)", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+          ImGui::TreePush ("");
+
+          static HMODULE hModScePad =
+            SK_GetModuleHandle (L"libscepad.dll");
+
+          if (hModScePad)
           {
-            ImGui::TreePush ("");
             ImGui::Checkbox ("Hook libScePad", &config.input.gamepad.hook_scepad);
 
             if (ImGui::IsItemHovered ())
-                ImGui::SetTooltip ("Features in this section of the control panel will not work if disabled");
+                ImGui::SetTooltip ("SONY's native input API; unlocks additional settings in games that use it");
 
-            if (config.input.gamepad.hook_scepad)
+            if (config.input.gamepad.hook_scepad && last_scepad != 0)
             {
               ImGui::SameLine   (0.0f, 30);
 
@@ -911,22 +1001,43 @@ SK::ControlPanel::Input::Draw (void)
               ImGui::EndGroup   ();
 
               ImGui::SameLine   ();
-
-              ImGui::BeginGroup ();
-              ImGui::Checkbox ("Apply Mute Button to -Game-",                           &config.input.gamepad.scepad.mute_applies_to_game);
-              ImGui::Checkbox ("Toggle Control Panel using  (" ICON_FA_PLAYSTATION ")", &config.input.gamepad.scepad.enhanced_ps_button);
-
-              if (ImGui::IsItemHovered ())
-                  ImGui::SetTooltip ("Exit \"Exclusive Input Mode\" by Holding Share / Select or Pressing Caps Lock");
-
-              ImGui::EndGroup   ();
             }
 
-            ImGui::TreePop  (  );
+            else
+              ImGui::SameLine   (0.0f, 30);
           }
 
-          ImGui::PopStyleColor (3);
+          bool bDualSense = false;
+
+          for ( auto& ps_controller : SK_HID_PlayStationControllers )
+          {
+            if (ps_controller.bDualSense)
+            {
+              bDualSense = true;
+              break;
+            }
+          }
+
+          ImGui::BeginGroup ();
+
+          if (bDualSense)
+            ImGui::Checkbox ("Apply Mute Button to -Game-",                           &config.input.gamepad.scepad.mute_applies_to_game);
+          ImGui::Checkbox   ("Toggle Control Panel using  (" ICON_FA_PLAYSTATION ")", &config.input.gamepad.scepad.enhanced_ps_button);
+
+          if (ImGui::IsItemHovered ())
+          {
+            if (config.input.gamepad.xinput.ui_slot > 3)
+              ImGui::SetTooltip ("Will not work while \"UI Controller\" is set to 'Nothing'");
+            else
+              ImGui::SetTooltip ("Exit \"Exclusive Input Mode\" by Holding Share / Select or Pressing Caps Lock");
+          }
+
+          ImGui::EndGroup   ();
+
+          ImGui::TreePop  (  );
         }
+
+        ImGui::PopStyleColor (3);
       }
 // TODO
 #if 0

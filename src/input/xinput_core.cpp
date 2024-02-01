@@ -42,59 +42,7 @@
 #define XINPUT_UPGRADE
 #define XUSER_MAX_INDEX (DWORD)XUSER_MAX_COUNT-1
 
-
-using SetupDiGetClassDevsW_pfn = HDEVINFO (WINAPI *)(
-  /*[in, optional]*/ const GUID *ClassGuid,
-  /*[in, optional]*/ PCWSTR     Enumerator,
-  /*[in, optional]*/ HWND       hwndParent,
-  /*[in]*/           DWORD      Flags
-);
-
-static SetupDiGetClassDevsW_pfn
-       SetupDiGetClassDevsW_Original = nullptr;
-
-HDEVINFO
-SetupDiGetClassDevsW_Detour (
-  /*[in, optional]*/ const GUID* ClassGuid,
-  /*[in, optional]*/ PCWSTR     Enumerator,
-  /*[in, optional]*/ HWND       hwndParent,
-  /*[in]*/           DWORD      Flags )
-{
-  if (SK_GetCallingDLL () != SK_GetDLL ())
-  {
-    SK_LOG_FIRST_CALL
-
-    static DWORD
-        dwLastCall = SK_timeGetTime ();
-    if (dwLastCall > SK_timeGetTime () - 500UL)
-    {
-      SetLastError (ERROR_NOT_FOUND);
-
-      return INVALID_HANDLE_VALUE;
-    }
-
-    dwLastCall = SK_timeGetTime ();
-  }
-
-  return
-    SetupDiGetClassDevsW_Original (ClassGuid, Enumerator, hwndParent, Flags);
-}
-
-
-#define SK_HID_VID_8BITDO        0x2dc8
-#define SK_HID_VID_LOGITECH      0x046d
-#define SK_HID_VID_MICROSOFT     0x045e
-#define SK_HID_VID_NINTENDO      0x057e
-#define SK_HID_VID_NVIDIA        0x0955
-#define SK_HID_VID_RAZER         0x1532
-#define SK_HID_VID_SONY          0x054c
-#define SK_HID_VID_VALVE         0x28de
-
-#define SK_HID_PID_XUSB          0x02a1 // Xbox 360 Controller Protocol
-#define SK_HID_PID_XBOXGIP       0x02ff // Xbox One Controller Protocol
-#define SK_HID_PID_STEAM_VIRTUAL 0x11ff // Steam Emulated Controller
-
-void SK_Steam_SignalEmulatedXInputActivity (DWORD dwSlot);
+void SK_Steam_SignalEmulatedXInputActivity (DWORD dwSlot, bool blocked);
 
 struct SK_XInputContext
 {
@@ -176,6 +124,7 @@ struct SK_XInputContext
 
   std::recursive_mutex cs_poll   [XUSER_MAX_COUNT] = { };
   std::recursive_mutex cs_haptic [XUSER_MAX_COUNT] = { };
+  std::recursive_mutex cs_power  [XUSER_MAX_COUNT] = { };
   std::recursive_mutex cs_hook   [XUSER_MAX_COUNT] = { };
   std::recursive_mutex cs_caps   [XUSER_MAX_COUNT] = { };
 
@@ -330,9 +279,10 @@ SK_XInput_GetPrimaryHookName (void)
   return "Unknown";
 }
 
-#define SK_XINPUT_READ(type)  SK_XInput_Backend->markRead   (type);
-#define SK_XINPUT_WRITE(type) SK_XInput_Backend->markWrite  (type);
+#define SK_XINPUT_READ(slot)  SK_XInput_Backend->markRead   (slot);
+#define SK_XINPUT_WRITE(slot) SK_XInput_Backend->markWrite  (slot);
 #define SK_XINPUT_VIEW(slot)  SK_XInput_Backend->markViewed ((sk_input_dev_type)(1 << slot));
+#define SK_XINPUT_HIDE(slot)  SK_XInput_Backend->markHidden ((sk_input_dev_type)(1 << slot));
 
 static SK_LazyGlobal <concurrency::concurrent_unordered_set <HMODULE>> warned_modules;
 
@@ -432,23 +382,33 @@ XInputEnable1_4_Detour (
   if (! pCtx)
     return;
 
+  static XInputEnable_pfn
+         XInputEnable_SK =
+        (XInputEnable_pfn)SK_GetProcAddress (xinput_ctx.XInput_SK.hMod,
+        "XInputEnable"                      );
+
   if (config.window.background_render)
   {
-    xinput_enabled             = TRUE;
+    xinput_enabled = TRUE;
 
     if (pCtx->XInputEnable_Original == nullptr)
       return;
 
-    pCtx->XInputEnable_Original (TRUE);
+  //config.input.gamepad.steam.disabled_to_game  ?
+  //            XInputEnable_SK (xinput_enabled) :
+    pCtx->XInputEnable_Original (xinput_enabled);
   }
+
   else
   {
-    xinput_enabled             = enable;
+    xinput_enabled = enable;
 
     if (pCtx->XInputEnable_Original == nullptr)
       return;
 
-    pCtx->XInputEnable_Original (enable);
+  //config.input.gamepad.steam.disabled_to_game  ?
+  //            XInputEnable_SK (xinput_enabled) :
+    pCtx->XInputEnable_Original (xinput_enabled);
   }
 
   // Migrate the function that we use internally over to
@@ -472,10 +432,10 @@ XInputGetState1_4_Detour (
   dwUserIndex =
     config.input.gamepad.xinput.assignment [std::min (dwUserIndex, XUSER_MAX_INDEX)];
 
-  // TODO: Indicate a read attempt, but distinguish it from SK_XINPUT_READ below
   if ( config.input.gamepad.xinput.blackout_api )
   {
-    SK_XInput_Backend->viewed.gamepad = SK_QueryPerf ().QuadPart;
+    SK_XINPUT_HIDE (dwUserIndex)
+
     return ERROR_DEVICE_NOT_CONNECTED;
   }
 
@@ -485,7 +445,11 @@ XInputGetState1_4_Detour (
   RtlZeroMemory (&pState->Gamepad, sizeof (XINPUT_GAMEPAD));
 
   if (! xinput_enabled)
+  {
+    SK_XINPUT_HIDE (dwUserIndex)
+
     return ERROR_SUCCESS;
+  }
 
   if (dwUserIndex >= XUSER_MAX_COUNT)
     return ERROR_DEVICE_NOT_CONNECTED;
@@ -530,12 +494,11 @@ XInputGetState1_4_Detour (
 
   if (dwRet == ERROR_SUCCESS)
   {
-    if (! nop) {
-      SK_XINPUT_READ (dwUserIndex);
+    if (! nop) SK_XINPUT_READ (dwUserIndex)
+    else       SK_XINPUT_HIDE (dwUserIndex)
 
-      if (      xinput_ctx.isDeviceSteamInput (dwUserIndex))
-        SK_Steam_SignalEmulatedXInputActivity (dwUserIndex);
-    }
+    if (      xinput_ctx.isDeviceSteamInput (dwUserIndex))
+      SK_Steam_SignalEmulatedXInputActivity (dwUserIndex, nop);
 
     // Game-specific hacks (i.e. button swap)
     SK_XInput_TalesOfAriseButtonSwap (pState);
@@ -662,10 +625,10 @@ XInputGetStateEx1_4_Detour (
   dwUserIndex =
     config.input.gamepad.xinput.assignment [std::min (dwUserIndex, XUSER_MAX_INDEX)];
 
-  // TODO: Indicate a read attempt, but distinguish it from SK_XINPUT_READ below
   if ( config.input.gamepad.xinput.blackout_api )
   {
-    SK_XInput_Backend->viewed.gamepad = SK_QueryPerf ().QuadPart;
+    SK_XINPUT_HIDE (dwUserIndex)
+
     return ERROR_DEVICE_NOT_CONNECTED;
   }
 
@@ -675,7 +638,11 @@ XInputGetStateEx1_4_Detour (
   RtlZeroMemory (&pState->Gamepad, sizeof (XINPUT_GAMEPAD));
 
   if (! xinput_enabled)
+  {
+    SK_XINPUT_HIDE (dwUserIndex)
+
     return ERROR_SUCCESS;
+  }
 
   if (dwUserIndex >= XUSER_MAX_COUNT) return ERROR_DEVICE_NOT_CONNECTED;
 
@@ -690,7 +657,7 @@ XInputGetStateEx1_4_Detour (
   static XInputGetStateEx_pfn
          XInputGetStateEx_SK =
         (XInputGetStateEx_pfn)SK_GetProcAddress (xinput_ctx.XInput_SK.hMod,
-        "XInputGetStateEx"                      );
+        XINPUT_GETSTATEEX_ORDINAL               );
 
   DWORD dwRet =
     SK_XInput_Holding (dwUserIndex) ? ERROR_DEVICE_NOT_CONNECTED
@@ -714,12 +681,13 @@ XInputGetStateEx1_4_Detour (
   //   whatever the game is actively using -- helps with X360Ce
   SK_XInput_EstablishPrimaryHook (hModCaller, pCtx);
 
-  if (   dwRet == ERROR_SUCCESS && (! nop))
+  if (dwRet == ERROR_SUCCESS)
   {
-    SK_XINPUT_READ (dwUserIndex);
+    if (! nop) SK_XINPUT_READ (dwUserIndex)
+    else       SK_XINPUT_HIDE (dwUserIndex)
 
     if (      xinput_ctx.isDeviceSteamInput (dwUserIndex))
-      SK_Steam_SignalEmulatedXInputActivity (dwUserIndex);
+      SK_Steam_SignalEmulatedXInputActivity (dwUserIndex, nop);
   }
 
   return dwRet;
@@ -745,7 +713,8 @@ XInputGetCapabilities1_4_Detour (
   // TODO: Indicate a read attempt, but distinguish it from SK_XINPUT_READ below
   if ( config.input.gamepad.xinput.blackout_api )
   {
-    SK_XInput_Backend->viewed.gamepad = SK_QueryPerf ().QuadPart;
+    SK_XINPUT_HIDE (dwUserIndex)
+
     return ERROR_DEVICE_NOT_CONNECTED;
   }
 
@@ -763,11 +732,17 @@ XInputGetCapabilities1_4_Detour (
   if (pCtx->XInputGetCapabilities_Original == nullptr)
     return ERROR_NOT_SUPPORTED;
 
+  static XInputGetCapabilities_pfn
+         XInputGetCapabilities_SK =
+        (XInputGetCapabilities_pfn)SK_GetProcAddress (xinput_ctx.XInput_SK.hMod,
+          "XInputGetCapabilities"                    );
+
   DWORD dwRet =
     SK_XInput_Holding (dwUserIndex) ? ERROR_DEVICE_NOT_CONNECTED
                                     :
       SK_XINPUT_CALL (   xinput_ctx.cs_caps [dwUserIndex],
-                                             dwUserIndex,
+                                             dwUserIndex, config.input.gamepad.steam.disabled_to_game ?
+                   XInputGetCapabilities_SK (dwUserIndex, dwFlags, pCapabilities)                     :
        pCtx->XInputGetCapabilities_Original (dwUserIndex, dwFlags, pCapabilities)
       );
 
@@ -802,10 +777,10 @@ XInputGetCapabilitiesEx1_4_Detour (
   dwUserIndex =
     config.input.gamepad.xinput.assignment [std::min (dwUserIndex, XUSER_MAX_INDEX)];
 
-  // TODO: Indicate a read attempt, but distinguish it from SK_XINPUT_READ below
   if ( config.input.gamepad.xinput.blackout_api )
   {
-    SK_XInput_Backend->viewed.gamepad = SK_QueryPerf ().QuadPart;
+    SK_XINPUT_HIDE (dwUserIndex)
+
     return ERROR_DEVICE_NOT_CONNECTED;
   }
 
@@ -823,11 +798,18 @@ XInputGetCapabilitiesEx1_4_Detour (
   if (pCtx->XInputGetCapabilitiesEx_Original == nullptr)
     return ERROR_NOT_SUPPORTED;
 
+  static XInputGetCapabilitiesEx_pfn
+         XInputGetCapabilitiesEx_SK =
+        (XInputGetCapabilitiesEx_pfn)SK_GetProcAddress (xinput_ctx.XInput_SK.hMod,
+          XINPUT_GETCAPABILITIES_EX_ORDINAL            );
+
   DWORD dwRet =
     SK_XInput_Holding (dwUserIndex) ? ERROR_DEVICE_NOT_CONNECTED
                                     :
       SK_XINPUT_CALL (     xinput_ctx.cs_caps [dwUserIndex],
-                                               dwUserIndex,
+                                               dwUserIndex, config.input.gamepad.steam.disabled_to_game ?
+                   XInputGetCapabilitiesEx_SK (
+                                   dwReserved, dwUserIndex, dwFlags, pCapabilitiesEx)                   :
        pCtx->XInputGetCapabilitiesEx_Original (
                                    dwReserved, dwUserIndex, dwFlags, pCapabilitiesEx)
       );
@@ -860,10 +842,10 @@ XInputGetBatteryInformation1_4_Detour (
   dwUserIndex =
     config.input.gamepad.xinput.assignment [std::min (dwUserIndex, XUSER_MAX_INDEX)];
 
-  // TODO: Indicate a read attempt, but distinguish it from SK_XINPUT_READ below
   if ( config.input.gamepad.xinput.blackout_api )
   {
-    SK_XInput_Backend->viewed.gamepad = SK_QueryPerf ().QuadPart;
+    SK_XINPUT_HIDE (dwUserIndex)
+
     return ERROR_DEVICE_NOT_CONNECTED;
   }
 
@@ -879,13 +861,18 @@ XInputGetBatteryInformation1_4_Detour (
   if (pCtx->XInputGetBatteryInformation_Original == nullptr)
     return ERROR_NOT_SUPPORTED;
 
+  static XInputGetBatteryInformation_pfn
+         XInputGetBatteryInformation_SK =
+        (XInputGetBatteryInformation_pfn)SK_GetProcAddress (xinput_ctx.XInput_SK.hMod,
+        "XInputGetBatteryInformation"                      );
+
   DWORD dwRet =
     SK_XInput_Holding (dwUserIndex) ? ERROR_DEVICE_NOT_CONNECTED
                                     :
       SK_XINPUT_CALL (          xinput_ctx.cs_caps [dwUserIndex],
-                                                    dwUserIndex,
-        pCtx->XInputGetBatteryInformation_Original (dwUserIndex, devType,
-                                                    pBatteryInformation)
+                                                    dwUserIndex, config.input.gamepad.steam.disabled_to_game ?
+                    XInputGetBatteryInformation_SK (dwUserIndex, devType, pBatteryInformation)               :
+        pCtx->XInputGetBatteryInformation_Original (dwUserIndex, devType, pBatteryInformation)
       );
 
   InterlockedExchange (&xinput_ctx.LastSlotState [dwUserIndex], dwRet);
@@ -924,10 +911,10 @@ XInputSetState1_4_Detour (
   dwUserIndex =
     config.input.gamepad.xinput.assignment [std::min (dwUserIndex, XUSER_MAX_INDEX)];
   
-  // TODO: Indicate a read attempt, but distinguish it from SK_XINPUT_READ below
   if ( config.input.gamepad.xinput.blackout_api )
   {
-    SK_XInput_Backend->viewed.gamepad = SK_QueryPerf ().QuadPart;
+    SK_XINPUT_HIDE (dwUserIndex)
+
     return ERROR_DEVICE_NOT_CONNECTED;
   }
 
@@ -949,7 +936,11 @@ XInputSetState1_4_Detour (
   if (! xinput_enabled)
   {
     xinput_ctx.preventHapticRecursion (dwUserIndex, false);
+
+    SK_XINPUT_HIDE (dwUserIndex)
+
     return ERROR_SUCCESS;
+
   }
 
   if (pVibration  == nullptr)         { xinput_ctx.preventHapticRecursion            (dwUserIndex, false);
@@ -967,12 +958,18 @@ XInputSetState1_4_Detour (
                    config.input.gamepad.haptic_ui ) ||
                config.input.gamepad.disable_rumble;
 
+  static XInputSetState_pfn
+         XInputSetState_SK =
+        (XInputSetState_pfn)SK_GetProcAddress (xinput_ctx.XInput_SK.hMod,
+        "XInputSetState"                      );
+
   DWORD dwRet =
     SK_XInput_Holding (dwUserIndex) ? ERROR_DEVICE_NOT_CONNECTED :
                                                              nop ?
                                                    ERROR_SUCCESS :
     SK_XINPUT_CALL ( xinput_ctx.cs_haptic [dwUserIndex],
-                                           dwUserIndex,
+                                           dwUserIndex, config.input.gamepad.steam.disabled_to_game ?
+                        XInputSetState_SK (dwUserIndex, pVibration)                                 :
             pCtx->XInputSetState_Original (dwUserIndex, pVibration)
     );
 
@@ -984,7 +981,12 @@ XInputSetState1_4_Detour (
 
   xinput_ctx.preventHapticRecursion (dwUserIndex, false);
 
-  if (   dwRet == ERROR_SUCCESS && (! nop)) SK_XINPUT_WRITE (sk_input_dev_type::Gamepad);
+  if (   dwRet == ERROR_SUCCESS)
+  {
+    if (! nop) SK_XINPUT_WRITE (sk_input_dev_type::Gamepad)
+    else       SK_XINPUT_HIDE  (dwUserIndex)
+  }
+
   return dwRet;
 }
 
@@ -1323,12 +1325,17 @@ XInputPowerOff1_4_Detour (
   dwUserIndex =
     config.input.gamepad.xinput.assignment [std::min (dwUserIndex, XUSER_MAX_INDEX)];
 
-  // TODO: Indicate a read attempt, but distinguish it from SK_XINPUT_READ below
   if ( config.input.gamepad.xinput.blackout_api )
   {
-    SK_XInput_Backend->viewed.gamepad = SK_QueryPerf ().QuadPart;
+    SK_XINPUT_HIDE (dwUserIndex)
+
     return ERROR_DEVICE_NOT_CONNECTED;
   }
+
+  static XInputPowerOff_pfn
+         XInputPowerOff_SK =
+        (XInputPowerOff_pfn)SK_GetProcAddress (xinput_ctx.XInput_SK.hMod,
+        XINPUT_POWEROFF_ORDINAL               );
 
   bool nop = ( SK_ImGui_WantGamepadCapture () );
 
@@ -1336,9 +1343,10 @@ XInputPowerOff1_4_Detour (
     SK_XInput_Holding (dwUserIndex) ? ERROR_DEVICE_NOT_CONNECTED :
                                                              nop ?
                                                    ERROR_SUCCESS :
-    SK_XINPUT_CALL ( xinput_ctx.cs_haptic [dwUserIndex],
-                                           dwUserIndex,
-            pCtx->XInputPowerOff_Original (dwUserIndex)
+    SK_XINPUT_CALL ( xinput_ctx.cs_power [dwUserIndex],
+                                          dwUserIndex, config.input.gamepad.steam.disabled_to_game ?
+                       XInputPowerOff_SK (dwUserIndex)                                             :
+           pCtx->XInputPowerOff_Original (dwUserIndex)
     );
 
   InterlockedExchange (&xinput_ctx.LastSlotState [dwUserIndex], dwRet);
@@ -1403,10 +1411,10 @@ XInputGetKeystroke1_4_Detour (
   dwUserIndex =
     config.input.gamepad.xinput.assignment [std::min (dwUserIndex, XUSER_MAX_INDEX)];
 
-  // TODO: Indicate a read attempt, but distinguish it from SK_XINPUT_READ below
   if ( config.input.gamepad.xinput.blackout_api )
   {
-    SK_XInput_Backend->viewed.gamepad = SK_QueryPerf ().QuadPart;
+    SK_XINPUT_HIDE (dwUserIndex)
+
     return ERROR_DEVICE_NOT_CONNECTED;
   }
 
@@ -1414,7 +1422,11 @@ XInputGetKeystroke1_4_Detour (
     return ERROR_INVALID_PARAMETER;
 
   if (! xinput_enabled)
+  {
+    SK_XINPUT_HIDE (dwUserIndex)
+
     return ERROR_EMPTY;
+  }
 
   if (dwUserIndex >= XUSER_MAX_COUNT)
     return ERROR_DEVICE_NOT_CONNECTED;
@@ -1425,16 +1437,26 @@ XInputGetKeystroke1_4_Detour (
   if (pCtx->XInputGetKeystroke_Original == nullptr)
     return ERROR_NOT_SUPPORTED;
 
+  static XInputGetKeystroke_pfn
+         XInputGetKeystroke_SK =
+        (XInputGetKeystroke_pfn)SK_GetProcAddress (xinput_ctx.XInput_SK.hMod,
+        "XInputGetKeystroke"                      );
+
   DWORD dwRet =
     SK_XInput_Holding (dwUserIndex) ? ERROR_DEVICE_NOT_CONNECTED
                                     :
       SK_XINPUT_CALL ( xinput_ctx.cs_poll [dwUserIndex],
-                                           dwUserIndex,
+                                           dwUserIndex,  config.input.gamepad.steam.disabled_to_game ?
+                    XInputGetKeystroke_SK (dwUserIndex, dwReserved, pKeystroke)                      :
         pCtx->XInputGetKeystroke_Original (dwUserIndex, dwReserved, pKeystroke)
       );
 
   if (SK_ImGui_FilterXInputKeystroke      (dwUserIndex, pKeystroke))
+  {
+    SK_XINPUT_HIDE (dwUserIndex)
+
     return ERROR_EMPTY;
+  }
 
   InterlockedExchange (&xinput_ctx.LastSlotState [dwUserIndex], dwRet);
 
@@ -1573,13 +1595,6 @@ XInputSetState9_1_0_Detour (
 void
 SK_Input_HookXInputContext (SK_XInputContext::instance_s* pCtx)
 {
-  // This causes periodic hitches, so hook and disable it.
-//SK_RunOnce (
-//  SK_CreateDLLHook2 (L"SetupAPI.dll", "SetupDiGetClassDevsW",
-//                                       SetupDiGetClassDevsW_Detour,
-//              static_cast_p2p <void> (&SetupDiGetClassDevsW_Original))
-//);
-
   pCtx->XInputGetState_Target =
     SK_GetProcAddress ( pCtx->wszModuleName,
                                    "XInputGetState" );

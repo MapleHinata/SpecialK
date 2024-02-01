@@ -1,4 +1,4 @@
-/**
+﻿/**
 * This file is part of Special K.
 *
 * Special K is free software : you can redistribute it
@@ -1231,8 +1231,7 @@ ActivateWindow ( HWND hWnd,
     {
       if (config.window.always_on_top != NoPreferenceOnTop)
       {
-        SK_Window_SetTopMost (game_window.active &&
-          config.window.always_on_top != PreventAlwaysOnTop,
+        SK_Window_SetTopMost (game_window.active,
                               game_window.active, hWnd);
       }
 
@@ -5169,6 +5168,8 @@ bool __ignore = false;
 #include <Hidclass.h>
 #include <Bthdef.h>
 
+DWORD dwLastWindowMessageProcessed = INFINITE;
+
 __declspec (noinline)
 LRESULT
 CALLBACK
@@ -5177,6 +5178,26 @@ SK_DetourWindowProc ( _In_  HWND   hWnd,
                       _In_  WPARAM wParam,
                       _In_  LPARAM lParam )
 {
+  // If we are forcing a shutdown, then route any messages through the
+  //   default Win32 handler.
+  if (  const bool abnormal_dll_state =
+      ( ReadAcquire (&__SK_DLL_Attached) == 0 ||
+        ReadAcquire (&__SK_DLL_Ending)   != 0  );
+                   abnormal_dll_state &&
+              ( uMsg != WM_SYSCOMMAND &&
+                uMsg != WM_CLOSE      &&
+                uMsg != WM_QUIT )
+     )
+  {
+    return
+      IsWindowUnicode (hWnd)                       ?
+       DefWindowProcW (hWnd, uMsg, wParam, lParam) :
+       DefWindowProcA (hWnd, uMsg, wParam, lParam);
+  }
+
+  dwLastWindowMessageProcessed =
+    SK_timeGetTime ();
+
   if (uMsg == WM_NULL)
   {
 #if 0
@@ -5191,27 +5212,6 @@ SK_DetourWindowProc ( _In_  HWND   hWnd,
     //   allow this to work the way it's supposed to... so @#$% it :)
     return 1;
 #endif
-  }
-
-
-  // If we are forcing a shutdown, then route any messages through the
-  //   default Win32 handler.
-  if ( ReadAcquire (&__SK_DLL_Ending) != FALSE && ( uMsg != WM_SYSCOMMAND &&
-                                                    uMsg != WM_CLOSE      &&
-                                                    uMsg != WM_QUIT )        )
-  {
-    if (IsWindow (hWnd))
-    {
-      return
-        SK_COMPAT_SafeCallProc ( &game_window, hWnd,
-                                               uMsg, wParam,
-                                                     lParam );
-    }
-
-    return
-      game_window.DefWindowProc ( hWnd,
-                                  uMsg, wParam,
-                                        lParam );
   }
 
 
@@ -5483,12 +5483,12 @@ SK_DetourWindowProc ( _In_  HWND   hWnd,
 
     case WM_SETCURSOR:
     {
-      if ((hWnd == game_window.hWnd || hWnd == game_window.child) && HIWORD (lParam) == WM_MOUSEMOVE)
+      if ((hWnd == game_window.hWnd || hWnd == game_window.child) && HIWORD (lParam) != WM_NULL)
       {
         if ( LOWORD (lParam) == HTCLIENT ||
              LOWORD (lParam) == HTTRANSPARENT )
         {
-          if (ImGui_WndProcHandler (hWnd, uMsg, wParam, lParam) != 0)
+          if (ImGui_WndProcHandler (hWnd, uMsg, wParam, lParam) != 0 && SK_ImGui_IsAnythingHovered ())
           {
             extern bool      __SK_EnableSetCursor;
                    bool bOrig =
@@ -5547,9 +5547,6 @@ SK_DetourWindowProc ( _In_  HWND   hWnd,
           {
             const auto pDevW =
               (DEV_BROADCAST_DEVICEINTERFACE_W *)pDevHdr;
-
-            static constexpr GUID GUID_XUSB_INTERFACE_CLASS =
-              { 0xEC87F1E3L, 0xC13B, 0x4100, { 0xB5, 0xF7, 0x8B, 0x84, 0xD5, 0x42, 0x60, 0xCB } };
 
             // Input Devices
             if (IsEqualGUID (pDevW->dbcc_classguid, GUID_DEVINTERFACE_HID)      ||
@@ -6479,7 +6476,8 @@ SK_Win32_IsDummyWindowClass (WNDCLASSEXW* pWindowClass)
     // F' it, there's a pattern here, just ignore all dummies.
     StrStrIW (pWindowClass->lpszClassName, L"dummy");
 
-  if (StrStrIW (pWindowClass->lpszClassName, L"Qt"))
+  if (StrStrIW (pWindowClass->lpszClassName, L"Qt") &&
+   (! StrStrIW (pWindowClass->lpszClassName, L"qtopengltest")))
     return false;
 
   return
@@ -7976,6 +7974,123 @@ bool SK_Window_OnFocusChange (HWND hWndNewTarget, HWND hWndOld)
   }
 
   return true;
+}
+
+
+void
+SK_Window_CreateTopMostFixupThread (void)
+{
+  static auto& rb =
+    SK_GetCurrentRenderBackend ();
+
+  //
+  // Create a thread to handle topmost status asynchronously, in case the game
+  //   stops responding while it has the wrong topmost state.
+  // 
+  //     (i.e. Prevent Unresponsive Fullscreen App from being TopMost)
+  //
+  static SK_AutoHandle _
+  ( SK_Thread_CreateEx ([](LPVOID)->DWORD
+    {
+      while (WaitForSingleObject (__SK_DLL_TeardownEvent, 250UL) != WAIT_OBJECT_0)
+      {
+        const bool smart_always_on_top =
+           config.window.always_on_top == SmartAlwaysOnTop  ||
+          (config.window.always_on_top == NoPreferenceOnTop && rb.isFakeFullscreen ());
+
+        static LONG64    last_frame_count = 0;
+        const bool unresponsive =
+          std::exchange (last_frame_count, SK_GetFramesDrawn ()) ==
+                         last_frame_count || dwLastWindowMessageProcessed < SK_timeGetTime () - 250;
+
+        const bool topmost =
+          SK_Window_IsTopMost (game_window.hWnd);
+
+        if (config.window.always_on_top != PreventAlwaysOnTop)
+        {
+          static bool
+            _removed_topmost = false;
+
+          if (unresponsive && topmost)
+          {
+            SK_LOGi1 (L"Game Window is TopMost and game has not drawn a "
+                      L"frame in > 250 ms; removing TopMost...");
+
+            SK_Window_SetTopMost (false, false, game_window.hWnd);
+
+            // Restore TopMost when game starts responding again...
+            _removed_topmost = true;
+          }
+
+          else if ((! unresponsive) && (! topmost))
+          {
+            bool foreground =
+              (SK_GetForegroundWindow () == game_window.hWnd) && game_window.active;
+
+            // Allow AlwaysOnTop status if the game is responsive
+            if ( config.window.always_on_top == AlwaysOnTop || 
+                           (_removed_topmost && foreground) ||
+                        (smart_always_on_top && foreground) )
+            {
+              SK_LOGi1 (L"Game Window was not TopMost, applying...");
+
+              SK_Window_SetTopMost (true, true, game_window.hWnd);
+
+              _removed_topmost = false;
+            }
+          }
+        }
+
+        // User never allows top-most, responsivity does not matter!
+        else if (topmost)
+        {
+          SK_LOGi1 (L"Game Window was TopMost, removing...");
+
+          SK_Window_SetTopMost (false, false, game_window.hWnd);
+        }
+      };
+
+      ShowWindow (game_window.hWnd, SW_HIDE);
+
+      SK_Thread_CloseSelf ();
+
+      return 0;
+    }, L"[SK] TopMost Coordinator")
+  );
+
+
+  const bool smart_always_on_top =
+     config.window.always_on_top == SmartAlwaysOnTop  ||
+    (config.window.always_on_top == NoPreferenceOnTop && rb.isFakeFullscreen ());
+
+  if (config.window.always_on_top != NoPreferenceOnTop &&
+           (! smart_always_on_top)) // It really is smart
+  {
+    bool bTopMost =
+      SK_Window_IsTopMost (game_window.hWnd);
+
+    switch (config.window.always_on_top)
+    {
+      case PreventAlwaysOnTop:
+        if (bTopMost)
+        {
+          SK_LOG1 ( ( L"Game Window was TopMost, removing..." ), L"Window Mgr" );
+
+          SK_DeferCommand ("Window.TopMost 0");
+        }
+        break;
+      case AlwaysOnTop:
+        if (! bTopMost)
+        {
+          SK_LOG1 ( ( L"Game Window was not TopMost, applying..." ), L"Window Mgr" );
+
+          SK_DeferCommand ("Window.TopMost 1");
+        }
+        break;
+      default:
+        break;
+    }
+  }
 }
 
 
